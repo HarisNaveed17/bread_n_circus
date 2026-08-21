@@ -1,0 +1,22 @@
+# Registered event sources. `enabled: false` switches a source off without a
+# code change. A slug with no registered scraper yet is skipped silently.
+sources:
+  - slug: blackhole
+    name: The Black Hole
+    url: https://theblackhole.pk/upcoming-events/
+    enabled: false # flipped on in M1
+
+  - slug: ticketwala
+    name: Ticketwala
+    url: https://ticketwala.pk
+    enabled: false # flipped on in M2 (or replaced by its fallback)
+
+# ---------------------------------------------------------------------------
+# Editorial track (M7, GATED — do not build against this yet).
+# Hand-curated Instagram organiser accounts and their bio-link URLs.
+# This is filled in by hand, not scraped. Schema stub only:
+#
+# bio_links:
+#   - handle: some_isb_collective
+#     bio_url: https://linktr.ee/some_isb_collective
+#     enabled: true
