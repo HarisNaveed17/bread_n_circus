@@ -226,6 +226,28 @@ Don't trust remembered per-message rates — Meta moved from per-conversation to
 per-message pricing during 2025 and the rate card shifts. Check the live
 pricing page before committing to any number.
 
+## Open threads
+
+Checkable in seconds — verify rather than trust, this list goes stale.
+
+1. **The cron has never actually run.** It's committed and pushed (live on
+   GitHub as of 2026-08-26), but no execution has been observed. `TURSO_DATABASE_URL`
+   and `TURSO_AUTH_TOKEN` are **not yet set as repo secrets**, so the first
+   firing will fail the guard step by design. Add the secrets, then trigger it
+   by hand from the Actions tab before trusting the schedule.
+2. **Unverified on a real runner:** `libsql-experimental` is a compiled
+   extension — if there's no wheel for the runner's Python 3.13 it builds from
+   source or fails. The first manual dispatch settles it.
+3. **Next build step: WhatsApp Phase 1** — see § Delivery. Webhook +
+   `render.py` WhatsApp flavor + `notify/whatsapp.py`. Build against Meta's
+   free test number; the real SIM isn't needed yet.
+4. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
+   Black Hole (free, single venue) and Ticketwala (paid ticketing) barely
+   overlap, so v0 likely doesn't need it — let real digests prove it's needed
+   rather than building fuzzy matching against a hypothetical. It gets real
+   once M7's Instagram organisers land, since those *will* cross-list with
+   Ticketwala.
+
 ## Working notes
 
 - **Tests never touch the network.** Every scraper test uses a fixture
