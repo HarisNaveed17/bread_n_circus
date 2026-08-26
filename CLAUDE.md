@@ -1,9 +1,13 @@
 # isb-events
 
 A weekly pipeline that scrapes Islamabad event listings, deduplicates them,
-renders a digest, and delivers it to Telegram on a GitHub Actions cron. Full
-usage/config docs live in `README.md` — this file is project memory and
-working notes for future sessions, not a duplicate of it.
+renders a digest, and delivers it on a GitHub Actions cron. Full usage/config
+docs live in `README.md` — this file is project memory and working notes for
+future sessions, not a duplicate of it.
+
+**Delivery is moving from Telegram to WhatsApp** — see [Delivery](#delivery).
+`README.md`, `render.py`, `notify/`, and the CLI still say/assume Telegram;
+that's accurate to the code today, not to the plan.
 
 ## Quickstart
 
@@ -38,6 +42,7 @@ datetimes are timezone-aware in `Asia/Karachi`.
   `render.py` can collapse recurring series into one line. `dedupe()` is a
   pass-through until M3.
 - `render.py` — pure function, `Event`s → Telegram MarkdownV2 message list.
+  Needs a WhatsApp flavor before delivery switches; see [Delivery](#delivery).
 - `store.py` — thin sqlite/libSQL wrapper, upsert-by-id, no ORM.
 - `cli.py` — Typer app: `fetch` / `render` / `send` / `run`.
 
@@ -77,6 +82,133 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
 - **GitHub Actions cron**: `.github/workflows/` is empty. The README
   describes a weekly cron but nothing implements it yet — this isn't tied to
   a numbered milestone, it's just a known gap.
+
+## Delivery
+
+**Decided 2026-08-26. Not yet built — no code in the repo reflects this.**
+
+Telegram is banned in Pakistan; reaching it needs a VPN, which kills it as a
+delivery channel for a local audience. Email was considered and rejected —
+trivial to build, but a weekly digest email gets ignored. **WhatsApp is the
+channel**, because it's where the audience already is.
+
+### The model: pull, not push
+
+WhatsApp bills business-initiated messages (approved templates, paid) but
+**not** user-initiated ones — a user messaging the bot opens a 24-hour service
+window in which replies are free and need no template. So the design inverts
+the usual broadcast:
+
+- **The bot is the product.** Someone messages "what's on" → reply with the
+  stored digest. Free, no template approval, unlimited.
+- **The weekly nudge is one template message** whose only job is to reopen
+  that free window: *"Your Islamabad week is ready — 12 events. Reply **what's
+  on** to see them."* Don't put the digest in the template — more variables
+  means more approval friction, and it's the costlier category.
+
+This keeps the only recurring cost at one message per subscriber per week, and
+keeps approval surface at exactly one template.
+
+### Shape
+
+The store is already remote (Turso), so the bot and the pipeline never talk to
+each other — they share a table:
+
+```
+GitHub Actions (weekly cron)          Webhook (stateless, always on)
+  fetch → render → store                 ← inbound WhatsApp message
+         ↓                                        ↓
+      Turso  ────────────────────────→  read this week's digest row
+         ↑                                        ↓
+   (already built, M0)                  reply via Cloud API
+```
+
+Phase 1 needs no LLM: any inbound message → reply with the stored digest text.
+A SELECT and a POST.
+
+### Cloud API, not the Business app
+
+These are different Meta products with confusingly similar names, and a phone
+number lives on **exactly one of them, never both**:
+
+- **WhatsApp Business App** — a phone app. No API, no webhooks. Cannot do this.
+- **WhatsApp Business Platform / Cloud API** — REST API hosted by Meta. No
+  device or SIM in the loop after registration. This is the one.
+
+Number plan: a cheap **local Pakistani SIM** (a US number works and costs the
+same — Meta prices by *recipient* country — but a +1 number messaging Pakistani
+users reads as spam). Register it **directly to Cloud API in the Meta
+dashboard; never install WhatsApp on it.** A number with a live consumer
+WhatsApp account has to have that account deleted first, sometimes with a
+cooldown. Registration is a one-time SMS/voice code; the SIM can go dormant
+immediately after, but keep it from being recycled — re-verification needs it.
+
+Do **not** automate the consumer app with the unofficial WhatsApp Web libraries
+(Baileys, whatsapp-web.js). ToS violation, numbers get permanently banned.
+
+### Build order
+
+Meta's dashboard provides a **free test number** (messages only allowlisted
+recipients, but real webhooks). Build all of Phase 1 against it — the real
+SIM's one-shot registration shouldn't be in play until the thing works.
+
+- **Phase 1** — webhook + dumb "any message → this week's digest". Zero cost,
+  no templates. Share the `wa.me` link by hand.
+- **Phase 2** — the nudge template, once there's a list worth nudging. This is
+  the `Notifier` swap the architecture was built for.
+- **Phase 3, optional** — real Q&A ("what's on Friday?", "anything free?") by
+  passing the week's structured events as context. The data is already clean
+  enough that this is a prompt, not a RAG project.
+
+### Code changes this implies
+
+Smaller than it looks — `notify/base.py` was written for exactly this swap:
+
+1. **`notify/whatsapp.py`** — a `Notifier` that sends the nudge template.
+   Drops in beside `DryRunNotifier`; `cli.py`'s `_notifier()` switches to it.
+2. **`render.py` needs a WhatsApp flavor** — the one real change. It currently
+   emits Telegram MarkdownV2, which backslash-escapes `.` `-` `!` etc.
+   WhatsApp wants bare `*bold*` and **no** escaping, so `escape_md2` must not
+   run. Cleanest: inject the escape fn + bold wrapper into `_event_line` /
+   `_pack` rather than fork the renderer. Message cap is 4096 on both, so
+   `_pack`'s splitting logic carries over untouched. Telegram is being dropped
+   outright, so no dual-flavor storage is needed — just switch what `render`
+   writes.
+3. **The webhook** — new, ~40 lines, outside the package (`bot/`).
+
+Hosting: **Vercel Python function + Turso's HTTP API** (free tier, stays in
+Python, HTTPS from a `git push`). Use Turso over HTTP, *not* the
+`libsql-experimental` driver — it's a compiled extension and fights serverless
+runtimes; plain `httpx` sidesteps it. Cloudflare Workers is the equivalent
+option if TypeScript is ever acceptable. Avoid the no-code platforms (Wati,
+Twilio Studio) — $30–50/mo for what a free tier covers here.
+
+### If it scales
+
+Cost is linear and modest; the real gates are Meta's, not money.
+
+- **Rates are set by the recipient's country**, not the sender's — Pakistani
+  recipients bill at Pakistan rates regardless of the bot's number.
+- **Template category is the main cost lever.** Marketing is the expensive
+  tier; utility is cheaper (and free inside an open service window). A digest
+  someone opted into can plausibly be phrased as utility rather than
+  marketing — the wording drives Meta's classification, so phrase the nudge
+  as a requested-update notification, and appeal a marketing classification.
+- **Messaging tiers gate volume before cost does.** Unverified business
+  accounts cap business-initiated conversations per day (low hundreds).
+  Getting past that needs Meta business verification with real business
+  documents — the actual blocker for scaling a hobby project, not the bill.
+  Verified accounts tier up (1K → 10K → 100K/day) on volume and quality.
+- **Quality rating throttles you.** Mutes, blocks, and reports on the nudge
+  drop the rating and cut the tier. A weekly blast is exactly the shape that
+  tanks it, which is another argument for the pull model: keep
+  business-initiated volume at one message and make it genuinely wanted.
+  Documented opt-in is a Meta requirement for business-initiated messages
+  anyway.
+
+Don't trust remembered per-message rates — Meta moved from per-conversation to
+per-message pricing during 2025 and the rate card shifts. Check the live
+pricing page before committing to any number.
 
 ## Working notes
 
