@@ -1,0 +1,50 @@
+{
+  "items": [
+    {
+      "id": "7164",
+      "title": "Kaavish Live (Jinnah Convention Centre, Islamabad)",
+      "slug": "kaavish-live-in-concert-7164",
+      "startDate": "2026-09-11 20:00:00",
+      "endDate": "2026-09-11 23:00:00",
+      "displayEndDate": "no",
+      "displayEndTime": "no",
+      "location": "Jinnah Convention Centre, Club Rd, Islamabad, Pakistan",
+      "cityName": "Islamabad",
+      "type": "events",
+      "expired": false,
+      "entry_fee": null,
+      "isFree": null
+    },
+    {
+      "id": "6986",
+      "title": "Saara Jahaan Raqs Mein Hai",
+      "slug": "saara-jahaan-raqs-mein-hai-6986",
+      "startDate": "2026-08-30 17:00:00",
+      "endDate": "2026-08-30 22:00:00",
+      "displayEndDate": "no",
+      "displayEndTime": "no",
+      "location": "Silk Road Cultural Center, G-5/1 G-5, Islamabad",
+      "cityName": "Islamabad",
+      "type": "events",
+      "expired": false,
+      "entry_fee": null,
+      "isFree": null
+    },
+    {
+      "id": "7043",
+      "title": "Darwaste Aadmi, a stand-up comedy show by Taimoor Saleem Abbasi",
+      "slug": "darwaste-aadmi-a-stand-up-comedy-show-by-taimoor-saleem-abbasi-7043",
+      "startDate": "2026-08-29 19:00:00",
+      "endDate": "2026-08-29 21:30:00",
+      "displayEndDate": "no",
+      "displayEndTime": "no",
+      "location": "Markaz, Shah Allah Ditta, Shah Allah Ditta, Islamabad",
+      "cityName": "Islamabad",
+      "type": "events",
+      "expired": false,
+      "entry_fee": null,
+      "isFree": null
+    }
+  ],
+  "totalPages": 1
+}

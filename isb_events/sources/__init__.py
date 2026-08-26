@@ -7,7 +7,7 @@ runs and populates the registry. Add new scrapers to the imports below.
 from . import (
     base,  # noqa: F401
     blackhole,  # noqa: F401
+    ticketwala,  # noqa: F401
 )
 
 # Scraper modules register themselves on import. Uncomment as they land.
-# from . import ticketwala  # noqa: F401  (M2)

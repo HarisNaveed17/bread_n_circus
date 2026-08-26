@@ -9,7 +9,7 @@ sources:
   - slug: ticketwala
     name: Ticketwala
     url: https://ticketwala.pk
-    enabled: false # flipped on in M2 (or replaced by its fallback)
+    enabled: true # flipped on in M2
 
 # ---------------------------------------------------------------------------
 # Editorial track (M7, GATED — do not build against this yet).
