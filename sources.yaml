@@ -4,7 +4,7 @@ sources:
   - slug: blackhole
     name: The Black Hole
     url: https://theblackhole.pk/upcoming-events/
-    enabled: false # flipped on in M1
+    enabled: true # flipped on in M1
 
   - slug: ticketwala
     name: Ticketwala
