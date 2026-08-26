@@ -76,9 +76,18 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
 - **M3 — not started**: real fuzzy dedup/merge. `rapidfuzz` is already a
   dependency, unused until this lands.
 - **M4–M6 — not yet described anywhere in the repo.**
-- **M7 — explicitly GATED, do not build against it yet**: hand-curated
-  Instagram organiser bio-link track. Schema stub only, commented out in
-  `sources.yaml`.
+- **M7 — GATED until v0 is proven end-to-end** (decided 2026-08-26):
+  hand-curated Instagram organiser bio-link track. Schema stub only, commented
+  out in `sources.yaml`. **v0 ships with Black Hole + Ticketwala only**; the
+  gate lifts once a digest goes scrape → store → WhatsApp for real. Curating
+  handles is then a `sources.yaml` edit, not a code change.
+  Two things to know before building it: (1) it never calls Instagram — the
+  handles are curated by hand and the fetch target is the *bio-link
+  destination* (linktr.ee etc.), a plain public page. This is deliberate:
+  Instagram's Graph API only reaches accounts you own, and scraping Instagram
+  directly means login walls, bans, and a ToS violation. (2) `bio_links` is
+  its own top-level key, separate from `sources` — it wants **one** scraper
+  iterating the list, not one module per organiser. The variable part is data.
 - **GitHub Actions cron**: `.github/workflows/` is empty. The README
   describes a weekly cron but nothing implements it yet — this isn't tied to
   a numbered milestone, it's just a known gap.
