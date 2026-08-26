@@ -88,9 +88,16 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   directly means login walls, bans, and a ToS violation. (2) `bio_links` is
   its own top-level key, separate from `sources` — it wants **one** scraper
   iterating the list, not one module per organiser. The variable part is data.
-- **GitHub Actions cron**: `.github/workflows/` is empty. The README
-  describes a weekly cron but nothing implements it yet — this isn't tied to
-  a numbered milestone, it's just a known gap.
+- **GitHub Actions cron — done** (`.github/workflows/weekly-digest.yml`):
+  runs `render` Saturdays 10:00 Karachi (05:00 UTC), scraping and saving the
+  digest into the store. **Sends nothing on purpose** — delivery is
+  mid-migration, and the WhatsApp bot reads the digest straight out of Turso,
+  so populating that row is the whole job and delivery stays additive. Guards
+  on `TURSO_DATABASE_URL` being set, because without it the store silently
+  falls back to a runner-local sqlite file and the run goes green having
+  persisted nothing. `workflow_dispatch` takes an optional `week_of`, and the
+  digest is echoed into the run summary so you can eyeball it without opening
+  Turso. Not tied to a numbered milestone.
 
 ## Delivery
 

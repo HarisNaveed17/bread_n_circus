@@ -1,7 +1,11 @@
 # isb-events
 
 A weekly pipeline that scrapes Islamabad event listings, deduplicates them,
-renders a digest, and delivers it to Telegram on a GitHub Actions cron.
+renders a digest, and delivers it.
+
+> Delivery is mid-migration from Telegram (banned in Pakistan) to WhatsApp.
+> The `send` command still speaks Telegram; the weekly cron deliberately does
+> not send at all yet. See `CLAUDE.md` § Delivery.
 
 ## Quickstart
 
@@ -28,6 +32,18 @@ All take `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming Mon–Sun).
 - Storage: set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for remote libSQL, or
   leave unset to use a local sqlite file (`ISB_DB_PATH`, default `isb_events.db`).
 - Delivery: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+
+## Automation
+
+`.github/workflows/weekly-digest.yml` runs `render` every Saturday at 10:00
+Karachi (05:00 UTC), scraping the enabled sources and saving the digest into
+the store. It sends nothing — that lands with the WhatsApp work.
+
+Needs two repo secrets: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. The job
+fails fast without them rather than silently writing to a throwaway sqlite
+file on the runner. Trigger it by hand from the Actions tab ("Run workflow"),
+optionally passing a `week_of` date; the rendered digest is echoed into the
+run summary either way.
 
 ## Development
 

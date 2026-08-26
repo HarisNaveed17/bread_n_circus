@@ -1,0 +1,91 @@
+name: Weekly digest
+
+# Scrapes the enabled sources and saves the rendered digest into the store.
+#
+# It deliberately does NOT send anything. Delivery is mid-migration from
+# Telegram to WhatsApp (see CLAUDE.md § Delivery), and the WhatsApp bot reads
+# the digest straight out of Turso — so populating that row is the whole job
+# here, and delivery becomes purely additive later.
+
+on:
+  schedule:
+    # Saturday 10:00 Asia/Karachi. GitHub cron is always UTC (UTC+5 → 05:00);
+    # neither GitHub nor Pakistan observes DST, so this doesn't drift.
+    - cron: "0 5 * * 6"
+  workflow_dispatch:
+    inputs:
+      week_of:
+        description: "Monday of the target week (YYYY-MM-DD). Blank = the coming week."
+        required: false
+        type: string
+
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      # Read via the environment, never interpolated into a run block —
+      # `${{ inputs.* }}` inline in a shell script is a script-injection hole.
+      WEEK_OF: ${{ inputs.week_of }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Fail fast if the store is not configured
+        run: |
+          if [ -z "$TURSO_DATABASE_URL" ]; then
+            echo "::error::TURSO_DATABASE_URL is unset. Without it the store" \
+                 "falls back to a local sqlite file that dies with the runner," \
+                 "so the run would look green but persist nothing."
+            exit 1
+          fi
+
+      - name: Scrape and save the digest
+        run: |
+          if [ -n "$WEEK_OF" ]; then
+            uv run isb-events render --week-of "$WEEK_OF"
+          else
+            uv run isb-events render
+          fi
+
+      - name: Show the digest in the run summary
+        run: |
+          uv run python - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import os
+          from datetime import date
+
+          from isb_events.models import DigestWindow
+          from isb_events.store import Store
+
+          week_of = os.environ.get("WEEK_OF") or ""
+          window = (
+              DigestWindow.week_of(date.fromisoformat(week_of))
+              if week_of
+              else DigestWindow.coming_week()
+          )
+          week_start = window.start.date()
+
+          with Store.open() as store:
+              row = store.get_digest(week_start)
+
+          print(f"### Digest for week of {week_start}")
+          print()
+          print("```")
+          print(row["rendered_text"] if row else "(no digest saved)")
+          print("```")
+          PY
