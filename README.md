@@ -89,6 +89,34 @@ file on the runner. Trigger it by hand from the Actions tab ("Run workflow"),
 optionally passing a `week_of` date; the rendered digest is echoed into the
 run summary either way.
 
+## WhatsApp bot (Phase 1)
+
+`bot/` answers any inbound WhatsApp message with the latest stored digest;
+`api/webhook.py` is the Vercel entrypoint. It never imports `isb_events` — it
+reads Turso over the HTTP API with plain `httpx`, because the pipeline's libSQL
+driver is a compiled extension and a poor fit for a serverless runtime. The two
+sides share a database table, not a process.
+
+Environment (set these in the Vercel project, not in the repo):
+
+| Variable | What it is |
+|----------|------------|
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | Same database the cron writes to |
+| `WHATSAPP_PHONE_NUMBER_ID` | From the Meta app dashboard |
+| `WHATSAPP_TOKEN` | Cloud API access token |
+| `WHATSAPP_VERIFY_TOKEN` | A string you invent; Meta echoes it back at subscribe time |
+| `WHATSAPP_APP_SECRET` | Signs inbound webhooks — without it every request is rejected |
+
+Deploy, then point Meta at `https://<deployment>/api/webhook` with the same
+`WHATSAPP_VERIFY_TOKEN` and subscribe to the `messages` field. Build against
+the dashboard's free test number: it only reaches allowlisted recipients, but
+the webhooks are real, so the one-shot registration of a real SIM stays out of
+play until the bot works.
+
+Replies are free-form text, which the Cloud API allows only inside the 24-hour
+window a user opens by messaging first — so Phase 1 costs nothing and needs no
+approved template. The weekly nudge template is Phase 2.
+
 ## Development
 
 ```bash

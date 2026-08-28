@@ -1,0 +1,4 @@
+# Vercel's Python runtime installs from this file; `uv`/pyproject.toml drive
+# the pipeline instead. The bot deliberately needs nothing but an HTTP client —
+# no libsql driver, since Turso is reached over its HTTP API.
+httpx>=0.27

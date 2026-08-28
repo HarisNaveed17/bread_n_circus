@@ -45,6 +45,10 @@ datetimes are timezone-aware in `Asia/Karachi`.
   Needs a WhatsApp flavor before delivery switches; see [Delivery](#delivery).
 - `store.py` — thin sqlite/libSQL wrapper, upsert-by-id, no ORM.
 - `cli.py` — Typer app: `fetch` / `render` / `send` / `run`.
+- `bot/` + `api/webhook.py` — the WhatsApp webhook (Phase 1). Stands apart
+  from the package on purpose: it imports no `isb_events` and no libSQL
+  driver, reaching Turso over the HTTP API instead. `bot/app.py` holds the
+  logic, `api/webhook.py` is a thin Vercel shim.
 
 ## Roadmap
 
@@ -244,9 +248,15 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    extension, have a wheel for the runner's Python 3.13?) is settled:
    `uv.lock` pins a cp313 `manylinux_2_17_x86_64` wheel, so the runner
    installs a binary and never builds from source.
-3. **Next build step: WhatsApp Phase 1** — see § Delivery. Webhook +
-   `render.py` WhatsApp flavor + `notify/whatsapp.py`. Build against Meta's
-   free test number; the real SIM isn't needed yet.
+3. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
+   WhatsApp flavour (`51abfed`) and the webhook exists (`bot/`,
+   `api/webhook.py`), tested offline and exercised over real HTTP locally —
+   handshake, signature accept/reject, digest reply. What has never happened
+   is a real Meta call: no app, no test number, no Vercel deploy, so the
+   Cloud API request shapes in `bot/whatsapp.py` are written from the docs
+   and unverified against the live API. Env vars and deploy steps are in
+   `README.md` § WhatsApp bot. `notify/whatsapp.py` is **not** part of this —
+   the nudge template is Phase 2, and nothing sends until then.
 4. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
    Black Hole (free, single venue) and Ticketwala (paid ticketing) barely
    overlap, so v0 likely doesn't need it — let real digests prove it's needed
