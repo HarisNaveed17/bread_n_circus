@@ -7,6 +7,12 @@ The store speaks one sqlite dialect. Which backend it hits is decided by env:
   or an in-memory db when `ISB_DB_PATH=":memory:"`.
 
 No ORM. Upsert on `id`, refresh `last_seen`.
+
+Every query here must run on *both* backends, which constrains the dialect:
+`libsql_experimental` is qmark-only (named `:param` dicts raise `TypeError`)
+and has no `row_factory`, so rows come back as plain tuples. Bind positionally
+and read column names off `cursor.description`; `tests/test_store.py` runs the
+whole store against both to keep that honest.
 """
 
 from __future__ import annotations
@@ -74,9 +80,9 @@ class Store:
                 url, sources, series_key, description, raw_json,
                 first_seen, last_seen
             ) VALUES (
-                :id, :title, :venue, :starts_at, :ends_at, :category, :price_text,
-                :url, :sources, :series_key, :description, :raw_json,
-                :now, :now
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
                 title       = excluded.title,
@@ -92,21 +98,22 @@ class Store:
                 raw_json    = excluded.raw_json,
                 last_seen   = excluded.last_seen
             """,
-            {
-                "id": event.id,
-                "title": event.title,
-                "venue": event.venue,
-                "starts_at": event.starts_at.isoformat(),
-                "ends_at": event.ends_at.isoformat() if event.ends_at else None,
-                "category": event.category,
-                "price_text": event.price_text,
-                "url": event.url,
-                "sources": json.dumps(event.sources),
-                "series_key": event.series_key,
-                "description": event.description,
-                "raw_json": json.dumps(event.raw) if event.raw is not None else None,
-                "now": now,
-            },
+            (
+                event.id,
+                event.title,
+                event.venue,
+                event.starts_at.isoformat(),
+                event.ends_at.isoformat() if event.ends_at else None,
+                event.category,
+                event.price_text,
+                event.url,
+                json.dumps(event.sources),
+                event.series_key,
+                event.description,
+                json.dumps(event.raw) if event.raw is not None else None,
+                now,
+                now,
+            ),
         )
         self._conn.commit()
 
@@ -120,27 +127,31 @@ class Store:
         self._conn.execute(
             """
             INSERT INTO digests (week_of, rendered_text, event_ids, created_at, sent_at)
-            VALUES (:week_of, :rendered_text, :event_ids, :created_at, NULL)
+            VALUES (?, ?, ?, ?, NULL)
             ON CONFLICT(week_of) DO UPDATE SET
                 rendered_text = excluded.rendered_text,
                 event_ids     = excluded.event_ids,
                 created_at    = excluded.created_at,
                 sent_at       = NULL
             """,
-            {
-                "week_of": week_of.isoformat(),
-                "rendered_text": rendered_text,
-                "event_ids": json.dumps(event_ids),
-                "created_at": _now_iso(),
-            },
+            (
+                week_of.isoformat(),
+                rendered_text,
+                json.dumps(event_ids),
+                _now_iso(),
+            ),
         )
         self._conn.commit()
 
     def get_digest(self, week_of: date) -> dict | None:
-        row = self._conn.execute(
-            "SELECT * FROM digests WHERE week_of = ?", (week_of.isoformat(),)
-        ).fetchone()
-        return dict(row) if row else None
+        cur = self._conn.execute("SELECT * FROM digests WHERE week_of = ?", (week_of.isoformat(),))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        # libSQL has no `row_factory` and hands back plain tuples, so `dict(row)`
+        # only works on the sqlite3 path. `cursor.description` is the one thing
+        # both backends agree on.
+        return {col[0]: value for col, value in zip(cur.description, row, strict=True)}
 
     def mark_digest_sent(self, week_of: date) -> None:
         self._conn.execute(
