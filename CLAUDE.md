@@ -235,9 +235,12 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    and `TURSO_AUTH_TOKEN` are **not yet set as repo secrets**, so the first
    firing will fail the guard step by design. Add the secrets, then trigger it
    by hand from the Actions tab before trusting the schedule.
-2. **Unverified on a real runner:** `libsql-experimental` is a compiled
-   extension — if there's no wheel for the runner's Python 3.13 it builds from
-   source or fails. The first manual dispatch settles it.
+2. **Turso is wired but unprovisioned** — the database doesn't exist yet.
+   Creating it and setting the two secrets is written up in `README.md`
+   § Storage. The old worry here (would `libsql-experimental`, a compiled
+   extension, have a wheel for the runner's Python 3.13?) is settled:
+   `uv.lock` pins a cp313 `manylinux_2_17_x86_64` wheel, so the runner
+   installs a binary and never builds from source.
 3. **Next build step: WhatsApp Phase 1** — see § Delivery. Webhook +
    `render.py` WhatsApp flavor + `notify/whatsapp.py`. Build against Meta's
    free test number; the real SIM isn't needed yet.
@@ -256,6 +259,15 @@ Checkable in seconds — verify rather than trust, this list goes stale.
   sources" tests pin `pipeline.load_enabled_sources` to `[]` specifically
   because a live source in `sources.yaml` would otherwise make them hit the
   network.
+- **The store must speak a dialect both backends accept.**
+  `libsql_experimental` is qmark-only — a named `:param` dict raises
+  `TypeError: 'dict' object cannot be converted to 'PyTuple'` — and it has no
+  `row_factory`, so rows arrive as plain tuples rather than `sqlite3.Row`.
+  `store.py` was written sqlite3-first and hit both (fixed in `f8d7e6c`);
+  nothing caught it because the Turso path had never once been executed.
+  `tests/test_store.py` now runs the whole store against sqlite3 *and* an
+  in-memory libSQL connection — put any new query through it, and bind
+  positionally.
 - **theblackhole.pk rate-limits.** It sits on Bluehost shared hosting behind
   what looks like a WAF — after ~6-8 requests within an hour during manual
   testing, it started returning HTTP 200 with an empty body (and eventually

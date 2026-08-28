@@ -29,9 +29,53 @@ All take `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming Mon–Sun).
 ## Configuration
 
 - Sources are declared in `sources.yaml` (`enabled` flag per source).
-- Storage: set `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` for remote libSQL, or
-  leave unset to use a local sqlite file (`ISB_DB_PATH`, default `isb_events.db`).
+- Storage: see [Storage](#storage) below.
 - Delivery: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+
+## Storage
+
+With `TURSO_DATABASE_URL` unset the store writes to a local sqlite file
+(`ISB_DB_PATH`, default `isb_events.db`) — that's the default for development
+and tests, and needs no setup. Set `TURSO_DATABASE_URL` (plus
+`TURSO_AUTH_TOKEN`) and the same code talks to a remote libSQL database
+instead. The cron needs the remote one, because a GitHub runner's filesystem
+dies with the job.
+
+Schema migrations in `migrations/` run on every `Store.open()`, so a fresh
+database needs no separate setup step.
+
+### Provisioning a Turso database
+
+```bash
+curl -sSfL https://get.tur.so/install.sh | bash   # then restart your shell
+turso auth login
+turso db create isb-events
+turso db show isb-events --url                   # -> libsql://isb-events-<org>.turso.io
+turso db tokens create isb-events                # -> the auth token; shown once
+```
+
+Verify it locally before wiring the cron to it — this writes a real digest, so
+it doubles as an end-to-end check:
+
+```bash
+export TURSO_DATABASE_URL="libsql://isb-events-<org>.turso.io"
+export TURSO_AUTH_TOKEN="<token>"
+uv run isb-events render
+turso db shell isb-events "select week_of, length(rendered_text) from digests"
+```
+
+Keep the token out of the repo — `export` it in your shell (or an untracked
+`.env`), never a tracked file.
+
+### Giving the cron access
+
+```bash
+gh secret set TURSO_DATABASE_URL --body "$TURSO_DATABASE_URL"
+gh secret set TURSO_AUTH_TOKEN   --body "$TURSO_AUTH_TOKEN"
+gh secret list
+```
+
+Then dispatch the workflow by hand (below) before trusting the schedule.
 
 ## Automation
 
