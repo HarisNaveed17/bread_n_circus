@@ -65,7 +65,15 @@ jobs:
 
       - name: Show the digest in the run summary
         run: |
-          uv run python - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          # `tee`, not `>`: the summary page is nicer to read, but the step log
+          # is what survives, what `gh run view --log` can reach, and what can
+          # be grepped later. Writing only to the summary made a silent success
+          # indistinguishable from an empty one.
+          #
+          # pipefail because the pipe would otherwise report tee's exit status
+          # and swallow a Python traceback entirely.
+          set -o pipefail
+          uv run python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import os
           from datetime import date
 
@@ -80,12 +88,31 @@ jobs:
           )
           week_start = window.start.date()
 
+          # Scheme only — never the host or the token.
+          url = os.environ.get("TURSO_DATABASE_URL") or ""
+          backend = url.split("://")[0] + "://" if "://" in url else "local sqlite file"
           with Store.open() as store:
               row = store.get_digest(week_start)
+              weeks = [r[0] for r in store._conn.execute(
+                  "SELECT week_of FROM digests ORDER BY week_of DESC LIMIT 5"
+              ).fetchall()]
 
           print(f"### Digest for week of {week_start}")
           print()
+          print(f"- store: {backend}")
+          print(f"- weeks present in `digests`: {weeks or 'none'}")
+          print()
+
+          if row is None:
+              # The render step reported success, so an empty read here means
+              # the two steps did not agree on a database or on a week.
+              print(f"**No digest row for {week_start}.**")
+              raise SystemExit(1)
+
+          text = row["rendered_text"]
+          print(f"- {len(text)} chars, {text.count(chr(10) * 2) + 1} blocks")
+          print()
           print("```")
-          print(row["rendered_text"] if row else "(no digest saved)")
+          print(text)
           print("```")
           PY
