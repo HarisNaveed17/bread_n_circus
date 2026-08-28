@@ -230,11 +230,14 @@ pricing page before committing to any number.
 
 Checkable in seconds — verify rather than trust, this list goes stale.
 
-1. **The cron has never actually run.** It's committed and pushed (live on
-   GitHub as of 2026-08-26), but no execution has been observed. `TURSO_DATABASE_URL`
-   and `TURSO_AUTH_TOKEN` are **not yet set as repo secrets**, so the first
-   firing will fail the guard step by design. Add the secrets, then trigger it
-   by hand from the Actions tab before trusting the schedule.
+1. **The cron has still never run** — `gh run list` was empty as of
+   2026-08-29. The secrets *are* now set (both added 2026-08-28), and the
+   workflow is registered and active, so the guard step should pass. What is
+   unverified is everything after it: nobody has confirmed the secrets point
+   at a live database, and the store's libSQL path was broken until `f8d7e6c`
+   — every run before that fix would have failed. Dispatch it by hand
+   (`gh workflow run weekly-digest.yml`) rather than letting the schedule be
+   the first real execution.
 2. **Turso is wired but unprovisioned** — the database doesn't exist yet.
    Creating it and setting the two secrets is written up in `README.md`
    § Storage. The old worry here (would `libsql-experimental`, a compiled
