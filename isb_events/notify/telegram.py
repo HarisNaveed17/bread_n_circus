@@ -1,5 +1,11 @@
 """Telegram Bot API delivery. Plain httpx, no bot framework — we send only.
 
+Kept only until the WhatsApp notifier lands; Telegram is being dropped (it is
+banned in Pakistan — see CLAUDE.md § Delivery). It sends **unformatted** text:
+`render.py` now emits WhatsApp flavour, which has none of the backslash
+escaping MarkdownV2 demands, so asking for `parse_mode: MarkdownV2` here would
+make the Bot API reject every message with a 400. Asterisks show up literally.
+
 Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 """
 
@@ -14,7 +20,7 @@ TIMEOUT = 20.0
 
 
 class TelegramNotifier:
-    """Sends each message as a MarkdownV2 Telegram message."""
+    """Sends each message as a plain-text Telegram message."""
 
     def __init__(self, token: str | None = None, chat_id: str | None = None) -> None:
         self.token = token or os.environ["TELEGRAM_BOT_TOKEN"]
@@ -29,12 +35,10 @@ class TelegramNotifier:
                     json={
                         "chat_id": self.chat_id,
                         "text": msg,
-                        "parse_mode": "MarkdownV2",
                         "disable_web_page_preview": True,
                     },
                 )
-                # Surface the Bot API's error body — a bare 400 hides the reason
-                # (almost always a MarkdownV2 escaping bug).
+                # Surface the Bot API's error body — a bare 400 hides the reason.
                 if resp.status_code != 200:
                     raise RuntimeError(
                         f"Telegram sendMessage failed {resp.status_code}: {resp.text}"
