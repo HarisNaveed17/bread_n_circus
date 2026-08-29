@@ -37,58 +37,36 @@ REQUIRED = [
 
 
 def diagnose() -> int:
-    """Answer the question the dashboard is bad at: is anything subscribed?
+    """Is the WhatsApp Business Account subscribed to this app?
 
-    A webhook can verify, and Meta's Test button can reach it, while inbound
-    messages still go nowhere — because the *WhatsApp Business Account* has to
-    be subscribed to the app, separately from the app's webhook fields. This
-    reads that state back rather than trusting a checkbox.
+    A webhook can pass verification and answer Meta's Test button while inbound
+    messages go nowhere, because the account is subscribed to the app
+    separately from the app's webhook fields. Needs WHATSAPP_WABA_ID from the
+    API Setup page.
     """
     from . import whatsapp
 
-    token = os.environ.get("WHATSAPP_TOKEN")
-    if not token:
-        print("WHATSAPP_TOKEN is unset.")
+    waba_id = os.environ.get("WHATSAPP_WABA_ID")
+    if not waba_id:
+        print("Set WHATSAPP_WABA_ID (API Setup page) to check subscriptions.")
         return 1
 
-    waba_ids = []
-    explicit = os.environ.get("WHATSAPP_WABA_ID")
-    if explicit:
-        waba_ids.append(explicit)
-    else:
-        # The token itself knows which accounts it was granted against.
-        debug = whatsapp.graph_get("debug_token", {"input_token": token})
-        data = debug.get("data") or {}
-        if "error" in debug:
-            print(f"debug_token failed: {debug['error'].get('message')}")
-        for scope in data.get("granular_scopes") or []:
-            if "whatsapp_business" in (scope.get("scope") or ""):
-                waba_ids.extend(scope.get("target_ids") or [])
-        waba_ids = list(dict.fromkeys(waba_ids))
-
-    if not waba_ids:
-        print("No WhatsApp Business Account id found from the token.")
-        print("Set WHATSAPP_WABA_ID from the app's API Setup page and re-run.")
+    subs = whatsapp.graph_get(f"{waba_id}/subscribed_apps")
+    if "error" in subs:
+        print(f"subscribed_apps: ERROR — {subs['error'].get('message')}")
         return 1
 
-    ok = True
-    for waba_id in waba_ids:
-        print(f"\nWhatsApp Business Account {waba_id}")
-        subs = whatsapp.graph_get(f"{waba_id}/subscribed_apps")
-        if "error" in subs:
-            print(f"  subscribed_apps: ERROR — {subs['error'].get('message')}")
-            ok = False
-            continue
-        apps = subs.get("data") or []
-        if not apps:
-            print("  subscribed_apps: NONE — this is why inbound messages go nowhere.")
-            print("  Fix: WhatsApp -> Configuration -> Webhook, subscribe the app,")
-            print("  then tick the `messages` field.")
-            ok = False
-        for entry in apps:
-            app_info = entry.get("whatsapp_business_api_data") or {}
-            print(f"  subscribed: {app_info.get('name') or app_info.get('id') or entry}")
-    return 0 if ok else 1
+    apps = subs.get("data") or []
+    if not apps:
+        print("subscribed_apps: NONE — inbound messages will go nowhere.")
+        print("Fix: WhatsApp -> Configuration -> Webhook, subscribe the app,")
+        print("then tick the `messages` field.")
+        return 1
+
+    for entry in apps:
+        info = entry.get("whatsapp_business_api_data") or {}
+        print(f"subscribed: {info.get('name') or info.get('id') or entry}")
+    return 0
 
 
 def main() -> int:

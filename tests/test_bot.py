@@ -69,11 +69,16 @@ def sent(monkeypatch):
 
 @pytest.fixture
 def stored_digest(monkeypatch):
-    """Serve a digest from the store without touching Turso."""
+    """Serve a digest from the store without touching Turso.
+
+    Also stubs `store.query`, which the health check calls directly to probe
+    the subscribers table — without this the suite would reach for the network.
+    """
 
     def _set(text):
         monkeypatch.setattr(store, "latest_digest", lambda: (text, "2026-08-31"))
 
+    monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
     _set(DIGEST)
     return _set
 
@@ -526,30 +531,6 @@ def test_graph_get_handles_a_non_json_body(monkeypatch):
     assert "502" in whatsapp.graph_get("x")["error"]["message"]
 
 
-def test_diagnose_finds_waba_ids_from_the_token(monkeypatch, capsys):
-    from bot import selftest
-
-    calls = []
-
-    def fake_get(path, params=None):
-        calls.append(path)
-        if path == "debug_token":
-            return {
-                "data": {
-                    "granular_scopes": [
-                        {"scope": "whatsapp_business_messaging", "target_ids": ["WABA1"]}
-                    ]
-                }
-            }
-        return {"data": [{"whatsapp_business_api_data": {"name": "isb-events"}}]}
-
-    monkeypatch.setattr(whatsapp, "graph_get", fake_get)
-    assert selftest.diagnose() == 0
-    out = capsys.readouterr().out
-    assert "WABA1" in out and "isb-events" in out
-    assert "WABA1/subscribed_apps" in calls
-
-
 def test_diagnose_reports_an_unsubscribed_account(monkeypatch, capsys):
     from bot import selftest
 
@@ -557,3 +538,20 @@ def test_diagnose_reports_an_unsubscribed_account(monkeypatch, capsys):
     monkeypatch.setattr(whatsapp, "graph_get", lambda path, params=None: {"data": []})
     assert selftest.diagnose() == 1
     assert "NONE" in capsys.readouterr().out
+
+
+def test_health_flags_a_missing_subscribers_table(monkeypatch, stored_digest):
+    """The bot writes subscribers but never creates them — the pipeline does."""
+
+    def boom(sql, args=None):
+        raise RuntimeError("SQLite error: no such table: subscribers")
+
+    monkeypatch.setattr(store, "query", boom)
+    body = app.handle_health(VERIFY_TOKEN)[1]
+    assert "subscribers: MISSING" in body
+    assert "no such table" in body
+
+
+def test_health_reports_a_present_subscribers_table(monkeypatch, stored_digest):
+    monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
+    assert "subscribers: table present" in app.handle_health(VERIFY_TOKEN)[1]

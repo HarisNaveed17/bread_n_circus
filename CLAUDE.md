@@ -346,6 +346,17 @@ Checkable in seconds — verify rather than trust, this list goes stale.
   `tests/test_store.py` now runs the whole store against sqlite3 *and* an
   in-memory libSQL connection — put any new query through it, and bind
   positionally.
+- **Migrations only run from the pipeline; the bot never applies them.**
+  `Store._migrate()` replays `migrations/*.sql` on every `Store.open()`, but
+  the bot reaches Turso over HTTP and has no migration runner. So a new
+  migration is live only after the pipeline next connects to that database —
+  and until then the bot hits `no such table` at runtime. This actually
+  happened with `002_subscribers.sql` (2026-08-30): the table did not exist
+  remotely until a `Store.open()` was run by hand, and the only symptom was a
+  logged traceback from `record_contact`. **After adding a migration, run the
+  pipeline against Turso before deploying a bot that depends on it.** The
+  webhook's `?health=` now reports a missing `subscribers` table for exactly
+  this reason.
 - **theblackhole.pk rate-limits.** It sits on Bluehost shared hosting behind
   what looks like a WAF — after ~6-8 requests within an hour during manual
   testing, it started returning HTTP 200 with an empty body (and eventually

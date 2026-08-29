@@ -76,6 +76,18 @@ def handle_health(token: str | None) -> tuple[int, str]:
     else:
         text, week_of = found
         lines.append(f"digest    : ok — week of {week_of}, {len(text)} chars")
+
+    # The bot writes subscribers but never creates them: migrations run in the
+    # pipeline's Store.open(), so a migration that has not been applied yet
+    # shows up here as a missing table rather than as a mid-message traceback.
+    try:
+        store.query("SELECT COUNT(*) FROM subscribers")
+        lines.append("subscribers: table present")
+    except Exception as exc:
+        lines.append(f"subscribers: MISSING — {exc}")
+        lines.append("            run the pipeline against this database once")
+        lines.append("            (`gh workflow run weekly-digest.yml`) to migrate")
+
     return 200, "\n".join(lines)
 
 
