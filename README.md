@@ -118,10 +118,12 @@ for first tests, but a deployment needs a permanent one: create a System User
 in Business settings, give it the WhatsApp accounts, and generate a token
 there.
 
-Check the values before deploying anything:
+Check the values before deploying anything. `.env` is gitignored and is not in
+the repo — create it from the template:
 
 ```bash
-set -a; source .env; set +a          # .env is gitignored
+cp .env.example .env                 # then fill in the blanks
+set -a; source .env; set +a          # nothing auto-loads it
 uv run python -m bot.selftest        # reports which vars are set, tries Turso
 uv run python -m bot.selftest 92300XXXXXXX   # ...and sends a real message
 ```
