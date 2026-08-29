@@ -276,7 +276,22 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    extension, have a wheel for the runner's Python 3.13?) is settled:
    `uv.lock` pins a cp313 `manylinux_2_17_x86_64` wheel, so the runner
    installs a binary and never builds from source.
-3. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
+3. **Outbound is verified against the live API** (2026-08-30). A free-form
+   text reached a real allowlisted phone via `python -m bot.selftest`, so the
+   access token, `WHATSAPP_PHONE_NUMBER_ID`, the allowlist and the request
+   shape in `send_text` are all confirmed — not doc-derived guesses any more.
+   Confirmed the hard way first: the same call returned 200 and delivered
+   nothing while no service window was open. **A 200 from the messages
+   endpoint means accepted, not delivered**; free-form text outside an open
+   24-hour window is dropped silently, with the only signal a later `failed`
+   status on the webhook. `bot/selftest.py -t` sends `hello_world` instead,
+   which is deliverable cold, to tell the two cases apart.
+
+   Still unverified: everything *inbound*. No deploy exists, so Meta has
+   never called the webhook, `verify_signature` has never seen a real
+   `X-Hub-Signature-256`, and nothing has read Turso from Vercel.
+
+4. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
    WhatsApp flavour (`51abfed`) and the webhook exists (`bot/`,
    `api/webhook.py`), tested offline and exercised over real HTTP locally —
    handshake, signature accept/reject, digest reply. What has never happened
@@ -285,7 +300,7 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    and unverified against the live API. Env vars and deploy steps are in
    `README.md` § WhatsApp bot. `notify/whatsapp.py` is **not** part of this —
    the nudge template is Phase 2, and nothing sends until then.
-4. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
+5. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
    Black Hole (free, single venue) and Ticketwala (paid ticketing) barely
    overlap, so v0 likely doesn't need it — let real digests prove it's needed
    rather than building fuzzy matching against a hypothetical. It gets real
