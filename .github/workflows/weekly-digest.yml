@@ -9,9 +9,16 @@ name: Weekly digest
 
 on:
   schedule:
-    # Saturday 10:00 Asia/Karachi. GitHub cron is always UTC (UTC+5 → 05:00);
+    # Saturday ~10:17 Asia/Karachi. GitHub cron is always UTC (UTC+5 → 05:17);
     # neither GitHub nor Pakistan observes DST, so this doesn't drift.
-    - cron: "0 5 * * 6"
+    #
+    # Deliberately not on the hour. GitHub's scheduler is best-effort and
+    # queues everyone's cron at once at :00, so top-of-hour jobs are the most
+    # delayed and the most often dropped outright — the 2026-08-29 05:00 run
+    # never happened. An odd minute sits in a quieter slot. This is still a
+    # best-effort trigger, not a guarantee: treat a missed week as expected
+    # behaviour and re-run by hand, rather than as a broken workflow.
+    - cron: "17 5 * * 6"
   workflow_dispatch:
     inputs:
       week_of:

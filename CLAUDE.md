@@ -234,14 +234,18 @@ pricing page before committing to any number.
 
 Checkable in seconds — verify rather than trust, this list goes stale.
 
-1. **The cron has still never run** — `gh run list` was empty as of
-   2026-08-29. The secrets *are* now set (both added 2026-08-28), and the
-   workflow is registered and active, so the guard step should pass. What is
-   unverified is everything after it: nobody has confirmed the secrets point
-   at a live database, and the store's libSQL path was broken until `f8d7e6c`
-   — every run before that fix would have failed. Dispatch it by hand
-   (`gh workflow run weekly-digest.yml`) rather than letting the schedule be
-   the first real execution.
+1. **The schedule has still never fired; manual dispatch works fine.** Two
+   `workflow_dispatch` runs on 2026-08-28 both went green end to end against
+   real Turso — scrape, store, and a digest read back out (1462 chars, week
+   of 2026-08-31). So secrets, database, and the libSQL path are all proven.
+   What has never happened is a *scheduled* run: the 2026-08-29 05:00 UTC
+   firing simply did not occur, with the workflow active, the repo public,
+   and the cron on the default branch. Nothing was misconfigured — GitHub's
+   scheduler is best-effort and drops top-of-hour jobs under load, so the
+   cron moved to `17 5 * * 6`. Whether that is enough is unknown until a
+   Saturday passes. **A missed week is expected behaviour, not a bug**; the
+   fallback is `gh workflow run weekly-digest.yml`. If it keeps missing, the
+   fix is an external trigger, not more workflow tuning.
 2. **Turso is wired but unprovisioned** — the database doesn't exist yet.
    Creating it and setting the two secrets is written up in `README.md`
    § Storage. The old worry here (would `libsql-experimental`, a compiled
