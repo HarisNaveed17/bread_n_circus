@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 # The function's working directory is not the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.app import handle_event, handle_verify  # noqa: E402
+from bot.app import handle_event, handle_health, handle_verify  # noqa: E402
 
 
 def app(environ, start_response):
@@ -36,7 +36,10 @@ def app(environ, start_response):
 
     if method == "GET":
         params = {k: v[0] for k, v in parse_qs(environ.get("QUERY_STRING", "")).items()}
-        status, body = handle_verify(params)
+        if "health" in params:
+            status, body = handle_health(params["health"])
+        else:
+            status, body = handle_verify(params)
     elif method == "POST":
         try:
             length = int(environ.get("CONTENT_LENGTH") or 0)

@@ -454,3 +454,42 @@ def test_wsgi_post_without_a_signature_is_rejected(sent, stored_digest, writes):
 def test_wsgi_rejects_other_methods():
     status, _ = _wsgi_call(method="DELETE")
     assert status.startswith("405")
+
+
+# -- the health check --------------------------------------------------------
+
+
+def test_health_requires_the_verify_token(stored_digest):
+    assert app.handle_health("wrong")[0] == 403
+    assert app.handle_health(None)[0] == 403
+
+
+def test_health_reports_a_reachable_digest(stored_digest):
+    status, body = app.handle_health(VERIFY_TOKEN)
+    assert status == 200
+    assert "week of 2026-08-31" in body
+    assert "MISSING" not in body
+
+
+def test_health_distinguishes_an_empty_store_from_a_broken_one(monkeypatch):
+    monkeypatch.setattr(store, "latest_digest", lambda: None)
+    assert "NO ROWS" in app.handle_health(VERIFY_TOKEN)[1]
+
+    def boom():
+        raise RuntimeError("401 Unauthorized")
+
+    monkeypatch.setattr(store, "latest_digest", boom)
+    body = app.handle_health(VERIFY_TOKEN)[1]
+    assert "UNREACHABLE" in body and "401 Unauthorized" in body
+
+
+def test_health_never_prints_secret_values(stored_digest):
+    body = app.handle_health(VERIFY_TOKEN)[1]
+    for secret in (APP_SECRET, "graph-token", "turso-token", VERIFY_TOKEN):
+        assert secret not in body
+
+
+def test_health_is_reachable_over_wsgi(stored_digest):
+    status, body = _wsgi_call(query=f"health={VERIFY_TOKEN}")
+    assert status.startswith("200")
+    assert "digest" in body

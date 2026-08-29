@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from . import store, whatsapp
 
@@ -40,6 +41,42 @@ def handle_verify(params: dict[str, str]) -> tuple[int, str]:
     if challenge is None:
         return 403, "verification failed"
     return 200, challenge
+
+
+def handle_health(token: str | None) -> tuple[int, str]:
+    """A GET diagnostic: can *this deployment* read the digest out of Turso?
+
+    That is the one path a webhook cannot tell you about from outside. When it
+    is broken the bot still answers, with the "no digest yet" placeholder, so
+    a misconfigured database and an empty one look identical from a phone.
+
+    Gated on the verify token so it is not a public endpoint, and it reports
+    only whether variables are set, never their values.
+    """
+    expected = os.environ.get("WHATSAPP_VERIFY_TOKEN")
+    if not expected or token != expected:
+        return 403, "forbidden"
+
+    url = os.environ.get("TURSO_DATABASE_URL") or ""
+    lines = [
+        f"turso url : {url.split('://')[0] + '://' if '://' in url else 'UNSET'}",
+        f"turso token: {'set' if os.environ.get('TURSO_AUTH_TOKEN') else 'MISSING'}",
+        f"wa token  : {'set' if os.environ.get('WHATSAPP_TOKEN') else 'MISSING'}",
+        f"wa number : {'set' if os.environ.get('WHATSAPP_PHONE_NUMBER_ID') else 'MISSING'}",
+        f"app secret: {'set' if os.environ.get('WHATSAPP_APP_SECRET') else 'MISSING'}",
+    ]
+    try:
+        found = store.latest_digest()
+    except Exception as exc:
+        lines.append(f"digest    : UNREACHABLE — {type(exc).__name__}: {exc}")
+        return 200, "\n".join(lines)
+
+    if found is None:
+        lines.append("digest    : store reachable, but NO ROWS in digests")
+    else:
+        text, week_of = found
+        lines.append(f"digest    : ok — week of {week_of}, {len(text)} chars")
+    return 200, "\n".join(lines)
 
 
 def handle_event(raw_body: bytes, signature: str | None) -> tuple[int, str]:
