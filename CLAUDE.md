@@ -270,12 +270,13 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    `workflow_dispatch` REST endpoint), not more workflow tuning. This is low
    stakes while nobody is messaging the bot: a late cron means a stale digest
    for a few hours, not an outage.
-2. **Turso is wired but unprovisioned** — the database doesn't exist yet.
-   Creating it and setting the two secrets is written up in `README.md`
-   § Storage. The old worry here (would `libsql-experimental`, a compiled
-   extension, have a wheel for the runner's Python 3.13?) is settled:
-   `uv.lock` pins a cp313 `manylinux_2_17_x86_64` wheel, so the runner
-   installs a binary and never builds from source.
+2. **Turso is provisioned and proven — nothing open here.** Kept as a record
+   of what was settled: the database exists, both secrets are set, and a
+   dispatched run scraped, stored and read a digest back out of it (1462
+   chars, week of 2026-08-31). The compiled-extension worry is settled too —
+   `uv.lock` pins a cp313 `manylinux_2_17_x86_64` wheel for
+   `libsql-experimental`, so the runner installs a binary rather than
+   building from source. Provisioning steps live in `README.md` § Storage.
 3. **Outbound is verified against the live API** (2026-08-30). A free-form
    text reached a real allowlisted phone via `python -m bot.selftest`, so the
    access token, `WHATSAPP_PHONE_NUMBER_ID`, the allowlist and the request
