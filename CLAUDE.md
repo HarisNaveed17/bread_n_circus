@@ -217,11 +217,19 @@ Cost is linear and modest; the real gates are Meta's, not money.
   someone opted into can plausibly be phrased as utility rather than
   marketing — the wording drives Meta's classification, so phrase the nudge
   as a requested-update notification, and appeal a marketing classification.
-- **Messaging tiers gate volume before cost does.** Unverified business
-  accounts cap business-initiated conversations per day (low hundreds).
-  Getting past that needs Meta business verification with real business
-  documents — the actual blocker for scaling a hobby project, not the bill.
-  Verified accounts tier up (1K → 10K → 100K/day) on volume and quality.
+- **Business verification is not a prerequisite. Nothing in this plan needs
+  it.** The test number never needs it. A real number on an unverified
+  account works too; what verification buys is a higher cap on
+  *business-initiated* conversations per rolling 24h (unverified sits in the
+  low hundreds; verified tiers up on volume and quality).
+  That cap is the one number the pull model was chosen to avoid caring
+  about. Replies inside a service window the user opened are not
+  business-initiated, so Phase 1 does not touch the cap at all, and Phase 2
+  spends exactly one nudge per subscriber per week. Verification only starts
+  to matter at more subscribers than this project is likely to have, and it
+  is a thing to do *then*, not a gate to clear first.
+  Note that opt-in documentation is a separate, policy-level requirement
+  that applies regardless of verification — see the quality bullet.
 - **Quality rating throttles you.** Mutes, blocks, and reports on the nudge
   drop the rating and cut the tier. A weekly blast is exactly the shape that
   tanks it, which is another argument for the pull model: keep
