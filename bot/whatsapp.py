@@ -82,6 +82,25 @@ def _post(payload: dict) -> dict:
     return resp.json()
 
 
+def graph_get(path: str, params: dict | None = None) -> dict:
+    """GET any Graph API node with the configured token. Diagnostics only.
+
+    Returns the parsed body on success and, on failure, the error body rather
+    than raising — a 400 from Graph explains itself and is the useful part.
+    """
+    token = os.environ["WHATSAPP_TOKEN"]
+    resp = httpx.get(
+        f"https://graph.facebook.com/{GRAPH_VERSION}/{path.lstrip('/')}",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params or {},
+        timeout=TIMEOUT,
+    )
+    try:
+        return resp.json()
+    except ValueError:
+        return {"error": {"message": f"HTTP {resp.status_code}: {resp.text[:200]}"}}
+
+
 def send_text(to: str, body: str) -> dict:
     """Free-form text. Deliverable only inside an open 24-hour service window."""
     return _post({"to": to, "type": "text", "text": {"body": body, "preview_url": False}})

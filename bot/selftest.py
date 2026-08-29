@@ -3,6 +3,7 @@
     uv run python -m bot.selftest                  # check configuration only
     uv run python -m bot.selftest 923001234567     # free-form text
     uv run python -m bot.selftest 923001234567 -t  # hello_world template
+    uv run python -m bot.selftest --diagnose       # is the WABA subscribed?
 
 Everything in `bot/whatsapp.py` was written from Meta's docs and has never
 been exercised against the live API, so this exists to find the mismatch
@@ -35,7 +36,65 @@ REQUIRED = [
 ]
 
 
+def diagnose() -> int:
+    """Answer the question the dashboard is bad at: is anything subscribed?
+
+    A webhook can verify, and Meta's Test button can reach it, while inbound
+    messages still go nowhere — because the *WhatsApp Business Account* has to
+    be subscribed to the app, separately from the app's webhook fields. This
+    reads that state back rather than trusting a checkbox.
+    """
+    from . import whatsapp
+
+    token = os.environ.get("WHATSAPP_TOKEN")
+    if not token:
+        print("WHATSAPP_TOKEN is unset.")
+        return 1
+
+    waba_ids = []
+    explicit = os.environ.get("WHATSAPP_WABA_ID")
+    if explicit:
+        waba_ids.append(explicit)
+    else:
+        # The token itself knows which accounts it was granted against.
+        debug = whatsapp.graph_get("debug_token", {"input_token": token})
+        data = debug.get("data") or {}
+        if "error" in debug:
+            print(f"debug_token failed: {debug['error'].get('message')}")
+        for scope in data.get("granular_scopes") or []:
+            if "whatsapp_business" in (scope.get("scope") or ""):
+                waba_ids.extend(scope.get("target_ids") or [])
+        waba_ids = list(dict.fromkeys(waba_ids))
+
+    if not waba_ids:
+        print("No WhatsApp Business Account id found from the token.")
+        print("Set WHATSAPP_WABA_ID from the app's API Setup page and re-run.")
+        return 1
+
+    ok = True
+    for waba_id in waba_ids:
+        print(f"\nWhatsApp Business Account {waba_id}")
+        subs = whatsapp.graph_get(f"{waba_id}/subscribed_apps")
+        if "error" in subs:
+            print(f"  subscribed_apps: ERROR — {subs['error'].get('message')}")
+            ok = False
+            continue
+        apps = subs.get("data") or []
+        if not apps:
+            print("  subscribed_apps: NONE — this is why inbound messages go nowhere.")
+            print("  Fix: WhatsApp -> Configuration -> Webhook, subscribe the app,")
+            print("  then tick the `messages` field.")
+            ok = False
+        for entry in apps:
+            app_info = entry.get("whatsapp_business_api_data") or {}
+            print(f"  subscribed: {app_info.get('name') or app_info.get('id') or entry}")
+    return 0 if ok else 1
+
+
 def main() -> int:
+    if "--diagnose" in sys.argv:
+        return diagnose()
+
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     for name in REQUIRED:
         print(f"  {'set    ' if os.environ.get(name) else 'MISSING'}  {name}")

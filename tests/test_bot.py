@@ -493,3 +493,67 @@ def test_health_is_reachable_over_wsgi(stored_digest):
     status, body = _wsgi_call(query=f"health={VERIFY_TOKEN}")
     assert status.startswith("200")
     assert "digest" in body
+
+
+# -- the subscription diagnostic ---------------------------------------------
+
+
+def test_graph_get_returns_the_error_body_rather_than_raising(monkeypatch):
+    """A 400 from Graph explains itself; that body is the useful part."""
+
+    class _Resp:
+        status_code = 400
+
+        def json(self):
+            return {"error": {"message": "Unsupported get request"}}
+
+    monkeypatch.setattr(whatsapp.httpx, "get", lambda url, **kw: _Resp())
+    assert whatsapp.graph_get("123/subscribed_apps")["error"]["message"] == (
+        "Unsupported get request"
+    )
+
+
+def test_graph_get_handles_a_non_json_body(monkeypatch):
+    class _Resp:
+        status_code = 502
+
+        text = "<html>bad gateway</html>"
+
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(whatsapp.httpx, "get", lambda url, **kw: _Resp())
+    assert "502" in whatsapp.graph_get("x")["error"]["message"]
+
+
+def test_diagnose_finds_waba_ids_from_the_token(monkeypatch, capsys):
+    from bot import selftest
+
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append(path)
+        if path == "debug_token":
+            return {
+                "data": {
+                    "granular_scopes": [
+                        {"scope": "whatsapp_business_messaging", "target_ids": ["WABA1"]}
+                    ]
+                }
+            }
+        return {"data": [{"whatsapp_business_api_data": {"name": "isb-events"}}]}
+
+    monkeypatch.setattr(whatsapp, "graph_get", fake_get)
+    assert selftest.diagnose() == 0
+    out = capsys.readouterr().out
+    assert "WABA1" in out and "isb-events" in out
+    assert "WABA1/subscribed_apps" in calls
+
+
+def test_diagnose_reports_an_unsubscribed_account(monkeypatch, capsys):
+    from bot import selftest
+
+    monkeypatch.setenv("WHATSAPP_WABA_ID", "WABA9")
+    monkeypatch.setattr(whatsapp, "graph_get", lambda path, params=None: {"data": []})
+    assert selftest.diagnose() == 1
+    assert "NONE" in capsys.readouterr().out
