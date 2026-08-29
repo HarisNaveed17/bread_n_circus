@@ -294,9 +294,24 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    status on the webhook. `bot/selftest.py -t` sends `hello_world` instead,
    which is deliverable cold, to tell the two cases apart.
 
-   Still unverified: everything *inbound*. No deploy exists, so Meta has
-   never called the webhook, `verify_signature` has never seen a real
-   `X-Hub-Signature-256`, and nothing has read Turso from Vercel.
+   **Inbound is verified too, as far as Meta's own calls go** (2026-08-30).
+   Deployed to Vercel at `isb-events-digest-adeni-chai.vercel.app`; against
+   the live URL the handshake echoes the challenge, a correctly signed POST
+   returns 200, and forged, unsigned and wrong-token requests all 403. A
+   statuses-only payload returns "no messages", so delivery receipts are
+   ignored rather than answered.
+
+   Two things to know about that deploy. **Vercel Deployment Protection
+   breaks the webhook**: with Vercel Authentication on, every request 302s to
+   `vercel.com/sso-api` before reaching the function, and Meta reports only
+   "verification failed". It has to be disabled — bypass tokens need a custom
+   header Meta will not send, and our own signature check is the real
+   boundary anyway. **Use the alias without the deploy hash**
+   (`isb-events-digest-adeni-chai...`, not `...-ejkxmrsj7-...`); the hashed
+   URL is unique to one deploy and dies on the next push.
+
+   Still unverified: reading Turso *from Vercel* (no code path exercised has
+   needed it yet), and an actual inbound WhatsApp message.
 
 4. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
    WhatsApp flavour (`51abfed`) and the webhook exists (`bot/`,
