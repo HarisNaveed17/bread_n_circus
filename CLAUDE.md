@@ -89,7 +89,10 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
 - **M3 — not started**: real fuzzy dedup/merge. `rapidfuzz` is already a
   dependency, unused until this lands.
 - **M4–M6 — not yet described anywhere in the repo.**
-- **M7 — GATED until v0 is proven end-to-end** (decided 2026-08-26):
+- **M7 — gate LIFTED 2026-08-30.** The condition was a digest going
+  scrape → store → WhatsApp for real; it has now done so. Original entry
+  follows.
+- **M7** (decided 2026-08-26):
   hand-curated Instagram organiser bio-link track. Schema stub only, commented
   out in `sources.yaml`. **v0 ships with Black Hole + Ticketwala only**; the
   gate lifts once a digest goes scrape → store → WhatsApp for real. Curating
@@ -313,7 +316,16 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    Still unverified: reading Turso *from Vercel* (no code path exercised has
    needed it yet), and an actual inbound WhatsApp message.
 
-4. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
+4. **WhatsApp Phase 1 works end to end** (2026-08-30). Texting the test
+   number returns the stored digest. Verified live: handshake, real Meta
+   signatures, Turso read from inside Vercel (`?health=`), and the reply.
+   What remains is Phase 2 (the nudge template and `notify/whatsapp.py`) and
+   a real Pakistani SIM — the sandbox number is `+1 555-667-9407`, and a `+1`
+   number reads as spam to a Pakistani audience.
+
+   Original entry, for the record:
+
+5. **WhatsApp Phase 1 is built but not deployed.** `render.py` emits
    WhatsApp flavour (`51abfed`) and the webhook exists (`bot/`,
    `api/webhook.py`), tested offline and exercised over real HTTP locally —
    handshake, signature accept/reject, digest reply. What has never happened
@@ -322,7 +334,7 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    and unverified against the live API. Env vars and deploy steps are in
    `README.md` § WhatsApp bot. `notify/whatsapp.py` is **not** part of this —
    the nudge template is Phase 2, and nothing sends until then.
-5. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
+6. **M3 dedup is deliberately deferred.** `dedupe()` is still a pass-through.
    Black Hole (free, single venue) and Ticketwala (paid ticketing) barely
    overlap, so v0 likely doesn't need it — let real digests prove it's needed
    rather than building fuzzy matching against a hypothetical. It gets real
@@ -357,6 +369,21 @@ Checkable in seconds — verify rather than trust, this list goes stale.
   pipeline against Turso before deploying a bot that depends on it.** The
   webhook's `?health=` now reports a missing `subscribers` table for exactly
   this reason.
+- **A WhatsApp webhook is two independent things, and the dashboard only
+  shows one of them.** (1) *App-level config*: callback URL, verify token, and
+  which fields the app wants — this is the Configuration page. (2)
+  *Account-level subscription*: the WABA keeps a list of apps subscribed to
+  it, at `/{waba-id}/subscribed_apps`, and **that list is what actually routes
+  inbound messages**. Config without subscription delivers nothing.
+  This cost hours on 2026-08-30. Everything the dashboard offers tests (1):
+  verification is a direct GET to the URL, and the *Test* button posts
+  straight to the callback, bypassing routing entirely — both pass while real
+  messages go nowhere. Worse, `subscribed_apps` was not empty: it held
+  `WA DevX Webhook Events 1P App`, Meta's own first-party app used by the
+  dashboard's testing UI, so the account looked subscribed while our app was
+  absent. `bot/selftest.py --diagnose` reads that list and `--subscribe`
+  POSTs to it; the onboarding flow usually does this for you, which is why
+  it is both easy to miss and invisible when it fails.
 - **theblackhole.pk rate-limits.** It sits on Bluehost shared hosting behind
   what looks like a WAF — after ~6-8 requests within an hour during manual
   testing, it started returning HTTP 200 with an empty body (and eventually
