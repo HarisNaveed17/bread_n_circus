@@ -107,11 +107,33 @@ Environment (set these in the Vercel project, not in the repo):
 | `WHATSAPP_VERIFY_TOKEN` | A string you invent; Meta echoes it back at subscribe time |
 | `WHATSAPP_APP_SECRET` | Signs inbound webhooks — without it every request is rejected |
 
-Deploy, then point Meta at `https://<deployment>/api/webhook` with the same
-`WHATSAPP_VERIFY_TOKEN` and subscribe to the `messages` field. Build against
-the dashboard's free test number: it only reaches allowlisted recipients, but
-the webhooks are real, so the one-shot registration of a real SIM stays out of
-play until the bot works.
+`WHATSAPP_PHONE_NUMBER_ID` is the **Phone number ID** shown beside the test
+number on the app's API Setup page — an opaque numeric id, not the phone
+number itself. `WHATSAPP_APP_SECRET` is under App settings → Basic.
+`WHATSAPP_VERIFY_TOKEN` is a string you invent; it just has to match what you
+type into Meta's webhook form.
+
+The access token on the API Setup page **expires in 24 hours**. That is fine
+for first tests, but a deployment needs a permanent one: create a System User
+in Business settings, give it the WhatsApp accounts, and generate a token
+there.
+
+Check the values before deploying anything:
+
+```bash
+set -a; source .env; set +a          # .env is gitignored
+uv run python -m bot.selftest        # reports which vars are set, tries Turso
+uv run python -m bot.selftest 92300XXXXXXX   # ...and sends a real message
+```
+
+The recipient has to be on the test number's allowlist. That command exercises
+the same `send_text` the webhook uses, so it fails on exactly what a live
+webhook would fail on — before Meta is in the loop.
+
+Then deploy, point Meta at `https://<deployment>/api/webhook` with the same
+`WHATSAPP_VERIFY_TOKEN`, and subscribe to the `messages` field. The test
+number only reaches allowlisted recipients, but its webhooks are real, so the
+one-shot registration of a real SIM stays out of play until the bot works.
 
 Replies are free-form text, which the Cloud API allows only inside the 24-hour
 window a user opens by messaging first — so Phase 1 costs nothing and needs no
