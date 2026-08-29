@@ -59,20 +59,45 @@ def incoming_messages(payload: dict) -> list[dict]:
     return found
 
 
-def send_text(to: str, body: str) -> None:
+def _post(payload: dict) -> dict:
+    """POST to the messages endpoint and return the parsed response.
+
+    A 200 here means *accepted for delivery*, not delivered. Free-form text to
+    someone with no open service window is accepted and then silently dropped;
+    the only signal is a later `failed` status on the webhook. So the response
+    body matters — it carries the resolved `wa_id` and the message id — and is
+    returned rather than discarded.
+    """
     phone_number_id = os.environ["WHATSAPP_PHONE_NUMBER_ID"]
     token = os.environ["WHATSAPP_TOKEN"]
     resp = httpx.post(
         f"https://graph.facebook.com/{GRAPH_VERSION}/{phone_number_id}/messages",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "text",
-            "text": {"body": body, "preview_url": False},
-        },
+        json={"messaging_product": "whatsapp", **payload},
         timeout=TIMEOUT,
     )
     if resp.status_code != 200:
         # The Graph API hides the reason behind a bare status; the body has it.
         raise RuntimeError(f"WhatsApp send failed {resp.status_code}: {resp.text}")
+    return resp.json()
+
+
+def send_text(to: str, body: str) -> dict:
+    """Free-form text. Deliverable only inside an open 24-hour service window."""
+    return _post({"to": to, "type": "text", "text": {"body": body, "preview_url": False}})
+
+
+def send_template(to: str, name: str, language: str = "en_US") -> dict:
+    """A template message — the only thing deliverable to a cold contact.
+
+    Every test number has `hello_world` pre-approved, which makes it the way to
+    prove the token and allowlist work without needing the recipient to message
+    first. The real nudge template is Phase 2.
+    """
+    return _post(
+        {
+            "to": to,
+            "type": "template",
+            "template": {"name": name, "language": {"code": language}},
+        }
+    )

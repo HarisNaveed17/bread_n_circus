@@ -1,13 +1,21 @@
 """One-off live check against the WhatsApp Cloud API. Not part of the suite.
 
-    uv run python -m bot.selftest              # check configuration only
-    uv run python -m bot.selftest 923001234567 # ...and send a real message
+    uv run python -m bot.selftest                  # check configuration only
+    uv run python -m bot.selftest 923001234567     # free-form text
+    uv run python -m bot.selftest 923001234567 -t  # hello_world template
 
 Everything in `bot/whatsapp.py` was written from Meta's docs and has never
 been exercised against the live API, so this exists to find the mismatch
 before a deploy does. It prints which variables are set — never their values.
 
 The recipient must be on the test number's allowlist, or Meta rejects the send.
+
+A 200 from the send endpoint means *accepted*, not *delivered*. Free-form text
+is only deliverable inside the 24-hour service window a recipient opens by
+messaging the number first; outside it the API accepts the request and the
+message is silently dropped. Use `-t` to send the pre-approved `hello_world`
+template instead — that is deliverable cold, so it isolates "token and
+allowlist are wrong" from "there is no open window".
 """
 
 from __future__ import annotations
@@ -47,13 +55,38 @@ def main() -> int:
         return 0
 
     recipient = sys.argv[1]
+    as_template = "-t" in sys.argv or "--template" in sys.argv
+
     try:
-        whatsapp.send_text(recipient, "isb-events self-test — the webhook is wired up.")
+        if as_template:
+            result = whatsapp.send_template(recipient, "hello_world")
+        else:
+            result = whatsapp.send_text(
+                recipient, "isb-events self-test — the webhook is wired up."
+            )
     except Exception as exc:
-        # The Graph API's reason is in the body, which send_text attaches.
+        # The Graph API's reason is in the body, which _post attaches.
         print(f"\nSend: FAILED — {exc}")
         return 1
-    print(f"\nSend: ok, check WhatsApp on {recipient}")
+
+    contacts = result.get("contacts") or [{}]
+    messages = result.get("messages") or [{}]
+    resolved = contacts[0].get("wa_id")
+    print(f"\nAccepted by Meta ({'template' if as_template else 'free-form text'})")
+    print(f"  requested : {recipient}")
+    print(f"  wa_id     : {resolved or '(none returned)'}")
+    print(f"  message id: {messages[0].get('id') or '(none returned)'}")
+    if resolved and resolved != recipient.lstrip("+"):
+        print("  note      : Meta rewrote the number; it dials the wa_id above.")
+
+    print("\nAccepted is not delivered.")
+    if as_template:
+        print("A template is deliverable cold, so if this one does not arrive the")
+        print("problem is the token, the phone number id, or the allowlist.")
+    else:
+        print("Free-form text only reaches someone with an open 24-hour service")
+        print("window. If nothing arrives, message the number from that phone")
+        print("first and re-run — or re-run with -t to test with a template.")
     return 0
 
 

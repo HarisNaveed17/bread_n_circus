@@ -333,3 +333,61 @@ def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
     raw, sig = _signed(payload)
     app.handle_event(raw, sig)
     assert [body for _, body in sent] == [DIGEST]
+
+
+# -- the send endpoint -------------------------------------------------------
+
+
+def test_send_text_returns_the_parsed_response(monkeypatch):
+    """A 200 carries the resolved wa_id and message id; both are diagnostic."""
+    body = {
+        "messaging_product": "whatsapp",
+        "contacts": [{"input": "+923236501038", "wa_id": "923236501038"}],
+        "messages": [{"id": "wamid.ABC", "message_status": "accepted"}],
+    }
+    sent_payload = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return body
+
+    def fake_post(url, **kwargs):
+        sent_payload.update(kwargs["json"])
+        return _Resp()
+
+    monkeypatch.setattr(whatsapp.httpx, "post", fake_post)
+    assert whatsapp.send_text("+923236501038", "hi") == body
+    assert sent_payload["messaging_product"] == "whatsapp"
+    assert sent_payload["type"] == "text"
+    assert sent_payload["text"]["body"] == "hi"
+
+
+def test_send_template_uses_the_template_shape(monkeypatch):
+    sent_payload = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        whatsapp.httpx,
+        "post",
+        lambda url, **kw: (sent_payload.update(kw["json"]), _Resp())[1],
+    )
+    whatsapp.send_template("923236501038", "hello_world")
+    assert sent_payload["type"] == "template"
+    assert sent_payload["template"] == {"name": "hello_world", "language": {"code": "en_US"}}
+
+
+def test_send_surfaces_the_graph_error_body(monkeypatch):
+    class _Resp:
+        status_code = 400
+        text = '{"error":{"message":"(#131030) Recipient not in allowed list"}}'
+
+    monkeypatch.setattr(whatsapp.httpx, "post", lambda url, **kw: _Resp())
+    with pytest.raises(RuntimeError, match="Recipient not in allowed list"):
+        whatsapp.send_text("923236501038", "hi")
