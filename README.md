@@ -11,7 +11,7 @@ renders a digest, and delivers it.
 ## Quickstart
 
 ```bash
-uv sync
+uv sync --extra pipeline    # scrapers etc; the bare install is the bot's
 uv run isb-events run --dry-run          # end to end, prints, persists nothing
 uv run isb-events run --dry-run --week-of 2026-08-24
 ```

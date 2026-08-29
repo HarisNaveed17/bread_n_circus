@@ -12,7 +12,7 @@ is gone from the code entirely. What is *not* built is the Phase 2 nudge, so
 ## Quickstart
 
 ```bash
-uv sync
+uv sync --extra pipeline    # bare `uv sync` gets the bot's deps only
 uv run isb-events run --dry-run          # end to end, prints, persists nothing
 uv run isb-events run --dry-run --week-of 2026-08-24
 uv run pytest          # offline — no test touches the network
@@ -51,7 +51,13 @@ datetimes are timezone-aware in `Asia/Karachi`.
 - `bot/` + `api/webhook.py` — the WhatsApp webhook (Phase 1). Stands apart
   from the package on purpose: it imports no `isb_events` and no libSQL
   driver, reaching Turso over the HTTP API instead. `bot/app.py` holds the
-  logic, `api/webhook.py` is a thin Vercel shim.
+  logic, `api/webhook.py` is a bare WSGI callable (Vercel's runtime serves
+  one WSGI/ASGI app per project, named by `[tool.vercel] entrypoint`).
+  **This is why `pyproject.toml`'s base dependencies are just `httpx` and
+  everything else sits in the `pipeline` extra**: Vercel resolves from
+  `pyproject.toml` + `uv.lock` with no way to point it at `requirements.txt`
+  instead, so anything in the base set gets shipped into the function.
+  Use `uv sync --extra pipeline` for pipeline work.
 
 ## Roadmap
 

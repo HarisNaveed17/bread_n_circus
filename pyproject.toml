@@ -4,8 +4,25 @@ version = "0.1.0"
 description = "Weekly digest of Islamabad events, scraped, deduplicated, and served over WhatsApp."
 readme = "README.md"
 requires-python = ">=3.13"
+# Base dependencies are the *bot's* dependencies, and only those.
+#
+# Vercel installs this project to run `api.webhook:app`, and with a uv.lock at
+# the repo root it resolves from pyproject.toml with zero configuration. There
+# is no "use requirements.txt instead" switch, so the base set is kept to what
+# the webhook actually imports; anything heavier would be shipped into a
+# serverless function that never calls it — including libsql-experimental, a
+# compiled extension the bot deliberately avoids by reaching Turso over HTTP.
+#
+# Extras are not installed unless asked for, which is the property being relied
+# on here. The pipeline is the thing that needs the rest:
+#
+#     uv sync --extra pipeline
 dependencies = [
     "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+pipeline = [
     "curl_cffi>=0.7",
     "selectolax>=0.3.21",
     "pydantic>=2.7",

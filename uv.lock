@@ -215,8 +215,12 @@ name = "isb-events"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "curl-cffi" },
     { name = "httpx" },
+]
+
+[package.optional-dependencies]
+pipeline = [
+    { name = "curl-cffi" },
     { name = "libsql-experimental" },
     { name = "pydantic" },
     { name = "python-dateutil" },
@@ -234,16 +238,17 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "curl-cffi", specifier = ">=0.7" },
+    { name = "curl-cffi", marker = "extra == 'pipeline'", specifier = ">=0.7" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "libsql-experimental", specifier = ">=0.0.36" },
-    { name = "pydantic", specifier = ">=2.7" },
-    { name = "python-dateutil", specifier = ">=2.9" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rapidfuzz", specifier = ">=3.9" },
-    { name = "selectolax", specifier = ">=0.3.21" },
-    { name = "typer", specifier = ">=0.12" },
+    { name = "libsql-experimental", marker = "extra == 'pipeline'", specifier = ">=0.0.36" },
+    { name = "pydantic", marker = "extra == 'pipeline'", specifier = ">=2.7" },
+    { name = "python-dateutil", marker = "extra == 'pipeline'", specifier = ">=2.9" },
+    { name = "pyyaml", marker = "extra == 'pipeline'", specifier = ">=6.0" },
+    { name = "rapidfuzz", marker = "extra == 'pipeline'", specifier = ">=3.9" },
+    { name = "selectolax", marker = "extra == 'pipeline'", specifier = ">=0.3.21" },
+    { name = "typer", marker = "extra == 'pipeline'", specifier = ">=0.12" },
 ]
+provides-extras = ["pipeline"]
 
 [package.metadata.requires-dev]
 dev = [

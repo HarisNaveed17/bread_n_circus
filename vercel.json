@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/webhook.py": {
+      "excludeFiles": "{tests/**,isb_events/**,migrations/**,.github/**,sources.yaml,CLAUDE.md}"
+    }
+  }
+}

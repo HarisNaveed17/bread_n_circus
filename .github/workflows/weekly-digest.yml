@@ -51,7 +51,11 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        # --extra pipeline: the base dependency set is the WhatsApp bot's, so
+        # that Vercel does not ship scrapers and a compiled libSQL driver into
+        # a serverless function. The scrapers live in the extra, and the cron
+        # is the thing that needs them.
+        run: uv sync --frozen --extra pipeline
 
       - name: Fail fast if the store is not configured
         run: |
