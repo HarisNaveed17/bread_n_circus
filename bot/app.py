@@ -80,6 +80,7 @@ def _body_text(message: dict) -> str:
 
 def _handle_message(message: dict) -> None:
     sender = message["from"]
+    log.info("bot: inbound %s message from %s", message.get("type", "?"), sender)
 
     # Best-effort: a bookkeeping failure must never cost someone their reply.
     try:
@@ -104,10 +105,18 @@ def _handle_message(message: dict) -> None:
 
 
 def _send_digest(to: str) -> None:
-    """Phase 1: anything that isn't STOP/SUBSCRIBE gets the digest. No LLM."""
+    """Phase 1: anything that isn't STOP/SUBSCRIBE gets the digest. No LLM.
+
+    Logs the outcome but never the message body — these are strangers' texts,
+    and the sender id is enough to trace a delivery through the logs.
+    """
     parts = store.digest_messages()
     if not parts:
+        # Reads the store successfully and finds nothing: either the cron has
+        # not run, or this deployment is pointed at the wrong database.
+        log.warning("bot: no digest stored; replying with the placeholder to %s", to)
         whatsapp.send_text(to, NO_DIGEST_REPLY)
         return
+    log.info("bot: sending digest (%d message(s)) to %s", len(parts), to)
     for part in parts:
         whatsapp.send_text(to, part)

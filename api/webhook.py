@@ -14,10 +14,16 @@ thing in the first place.
 
 from __future__ import annotations
 
+import logging
 import sys
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import parse_qs
+
+# Without this the root logger sits at WARNING and every log.info below is
+# dropped, which leaves a healthy request and a broken one looking identical
+# in Vercel's log view. Anything written to stdout/stderr is collected.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 # The function's working directory is not the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
