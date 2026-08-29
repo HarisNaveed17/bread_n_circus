@@ -8,8 +8,12 @@ API needs nothing but `httpx`.
 from __future__ import annotations
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
+
+KARACHI = ZoneInfo("Asia/Karachi")
 
 TIMEOUT = 10.0
 
@@ -72,3 +76,40 @@ def digest_messages() -> list[str]:
         return []
     text, _ = found
     return [part for part in text.split(MESSAGE_SEPARATOR) if part.strip()]
+
+
+# -- subscribers -------------------------------------------------------------
+#
+# The bot is the only writer: it is the only side that sees inbound messages.
+# `isb_events/store.py` reads them back for the nudge.
+
+RECORD_CONTACT_SQL = """
+INSERT INTO subscribers (wa_id, first_seen, last_seen, message_count)
+VALUES (?, ?, ?, 1)
+ON CONFLICT(wa_id) DO UPDATE SET
+    last_seen     = excluded.last_seen,
+    message_count = subscribers.message_count + 1
+"""
+
+# Consent is only ever granted explicitly, so opting in clears any earlier STOP
+# — that is a person asking again, not an accident.
+OPT_IN_SQL = "UPDATE subscribers SET opted_in_at = ?, opted_out_at = NULL WHERE wa_id = ?"
+OPT_OUT_SQL = "UPDATE subscribers SET opted_out_at = ? WHERE wa_id = ?"
+
+
+def _now() -> str:
+    return datetime.now(KARACHI).isoformat()
+
+
+def record_contact(wa_id: str) -> None:
+    """Log that someone messaged us. Not consent to message them first."""
+    now = _now()
+    query(RECORD_CONTACT_SQL, [wa_id, now, now])
+
+
+def opt_in(wa_id: str) -> None:
+    query(OPT_IN_SQL, [_now(), wa_id])
+
+
+def opt_out(wa_id: str) -> None:
+    query(OPT_OUT_SQL, [_now(), wa_id])

@@ -35,11 +35,23 @@ def _week_start(window: DigestWindow) -> date:
 
 
 def _notifier(dry_run: bool) -> Notifier:
+    """Delivery is pull, not push — there is nothing to send digests *to*.
+
+    Telegram is gone (banned in Pakistan). Its replacement is not another
+    push channel: the WhatsApp bot in `bot/` serves the stored digest when
+    someone asks for it, which is why the cron renders and stops. The weekly
+    nudge is Phase 2 and needs a Meta-approved template, so until it exists a
+    non-dry-run send has no channel and says so rather than failing obscurely.
+    """
     if dry_run:
         return DryRunNotifier()
-    from .notify.telegram import TelegramNotifier  # noqa: PLC0415
-
-    return TelegramNotifier()
+    typer.echo(
+        "No push channel is configured. Digests are delivered by the WhatsApp "
+        "bot on request (see bot/ and CLAUDE.md § Delivery); the weekly nudge "
+        "is Phase 2. Use --dry-run to print the stored digest.",
+        err=True,
+    )
+    raise typer.Exit(1)
 
 
 @app.callback()

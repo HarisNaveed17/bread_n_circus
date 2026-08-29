@@ -29,3 +29,17 @@ def test_render_then_send_roundtrips_through_store(tmp_path, monkeypatch):
     r2 = runner.invoke(app, ["send", "--week-of", "2026-08-24", "--dry-run"])
     assert r2.exit_code == 0, r2.output
     assert "No events found" in r2.output
+
+
+def test_send_without_dry_run_reports_that_there_is_no_push_channel(tmp_path, monkeypatch):
+    """Telegram is deleted and the Phase 2 nudge does not exist yet.
+
+    The failure has to name the reason: silently doing nothing, or a bare
+    traceback from a missing notifier, both read as a bug in the pipeline.
+    """
+    monkeypatch.setenv("ISB_DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(pipeline, "load_enabled_sources", lambda: [])
+    runner.invoke(app, ["render", "--week-of", "2026-08-24"])
+    result = runner.invoke(app, ["send", "--week-of", "2026-08-24"])
+    assert result.exit_code == 1
+    assert "no push channel" in result.output.lower()

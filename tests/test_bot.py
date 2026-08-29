@@ -263,3 +263,73 @@ def test_non_json_body_is_ignored_not_retried(sent):
     mac = hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
     assert app.handle_event(raw, f"sha256={mac}") == (200, "ignored")
     assert sent == []
+
+
+# -- subscribers and consent -------------------------------------------------
+
+
+@pytest.fixture
+def writes(monkeypatch):
+    """Capture subscriber writes without touching Turso."""
+    calls = []
+    for name in ("record_contact", "opt_in", "opt_out"):
+        monkeypatch.setattr(store, name, lambda wa_id, _n=name: calls.append((_n, wa_id)))
+    return calls
+
+
+def test_every_message_records_a_contact(sent, stored_digest, writes):
+    raw, sig = _signed(_message_payload(text="hi"))
+    app.handle_event(raw, sig)
+    assert ("record_contact", "923001234567") in writes
+
+
+def test_a_plain_message_is_not_treated_as_consent(sent, stored_digest, writes):
+    """Meta requires explicit opt-in before any business-initiated message."""
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert [name for name, _ in writes] == ["record_contact"]
+
+
+def test_subscribe_opts_in_and_still_sends_the_digest(sent, stored_digest, writes):
+    raw, sig = _signed(_message_payload(text="Subscribe"))
+    app.handle_event(raw, sig)
+    assert ("opt_in", "923001234567") in writes
+    assert [body for _, body in sent] == [app.OPT_IN_REPLY, DIGEST]
+
+
+def test_stop_opts_out_and_sends_no_digest(sent, stored_digest, writes):
+    raw, sig = _signed(_message_payload(text="STOP"))
+    app.handle_event(raw, sig)
+    assert ("opt_out", "923001234567") in writes
+    assert [body for _, body in sent] == [app.OPT_OUT_REPLY]
+
+
+def test_stop_matching_is_exact_not_substring(sent, stored_digest, writes):
+    """'Stop Commenting on My Body' is a real event in this week's digest."""
+    raw, sig = _signed(_message_payload(text="tell me about Stop Commenting on My Body"))
+    app.handle_event(raw, sig)
+    assert [name for name, _ in writes] == ["record_contact"]
+    assert [body for _, body in sent] == [DIGEST]
+
+
+def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, monkeypatch):
+    def boom(wa_id):
+        raise RuntimeError("turso down")
+
+    monkeypatch.setattr(store, "record_contact", boom)
+    raw, sig = _signed(_message_payload())
+    app.handle_event(raw, sig)
+    assert [body for _, body in sent] == [DIGEST]
+
+
+def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
+    payload = _message_payload()
+    payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
+        "id": "wamid.IMG",
+        "from": "923001234567",
+        "type": "image",
+        "image": {"id": "media-id"},
+    }
+    raw, sig = _signed(payload)
+    app.handle_event(raw, sig)
+    assert [body for _, body in sent] == [DIGEST]

@@ -160,6 +160,40 @@ class Store:
         )
         self._conn.commit()
 
+    # -- subscribers ----------------------------------------------------------
+    #
+    # Read-only on this side. The bot is the only writer (over Turso's HTTP
+    # API, in `bot/store.py`), because it is the only side that sees inbound
+    # messages; the pipeline only ever needs to know who to nudge.
+
+    def opted_in_subscribers(self) -> list[str]:
+        """`wa_id`s that may be messaged first: opted in and not opted out.
+
+        A row carrying `opted_out_at` is never messaged. Only an explicit
+        re-subscribe clears it (`bot/store.py`) — nothing the bot does
+        incidentally, such as recording a contact, can revive a STOP.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT wa_id FROM subscribers
+            WHERE opted_in_at IS NOT NULL AND opted_out_at IS NULL
+            ORDER BY opted_in_at
+            """
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def subscriber_counts(self) -> dict[str, int]:
+        """Contacts vs. consented, for the run summary and for sanity checks."""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN opted_in_at IS NOT NULL
+                             AND opted_out_at IS NULL THEN 1 ELSE 0 END)
+            FROM subscribers
+            """
+        ).fetchone()
+        return {"contacts": row[0] or 0, "opted_in": row[1] or 0}
+
 
 def _connect_libsql(url: str, auth_token: str | None) -> sqlite3.Connection:
     """Lazily open a libSQL connection; import only when Turso is configured."""

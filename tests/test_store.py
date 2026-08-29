@@ -100,3 +100,44 @@ def test_mark_digest_sent(store):
     store.save_digest(WEEK_OF, "text", [])
     store.mark_digest_sent(WEEK_OF)
     assert store.get_digest(WEEK_OF)["sent_at"] is not None
+
+
+# -- subscribers -------------------------------------------------------------
+#
+# Read-only here; the bot writes them over Turso's HTTP API. Rows are inserted
+# with raw SQL so these tests pin the reads, not the writer.
+
+
+def _add_subscriber(store, wa_id, opted_in=None, opted_out=None):
+    store._conn.execute(
+        """
+        INSERT INTO subscribers
+            (wa_id, first_seen, last_seen, message_count, opted_in_at, opted_out_at)
+        VALUES (?, '2026-08-01', '2026-08-01', 1, ?, ?)
+        """,
+        (wa_id, opted_in, opted_out),
+    )
+    store._conn.commit()
+
+
+def test_opted_in_subscribers_excludes_mere_contacts(store):
+    """Messaging the bot is not consent to be messaged first."""
+    _add_subscriber(store, "923001111111")  # contacted only
+    _add_subscriber(store, "923002222222", opted_in="2026-08-02")
+    assert store.opted_in_subscribers() == ["923002222222"]
+
+
+def test_opt_out_wins_over_opt_in(store):
+    _add_subscriber(store, "923003333333", opted_in="2026-08-02", opted_out="2026-08-03")
+    assert store.opted_in_subscribers() == []
+
+
+def test_subscriber_counts_separates_contacts_from_consent(store):
+    _add_subscriber(store, "923001111111")
+    _add_subscriber(store, "923002222222", opted_in="2026-08-02")
+    _add_subscriber(store, "923003333333", opted_in="2026-08-02", opted_out="2026-08-03")
+    assert store.subscriber_counts() == {"contacts": 3, "opted_in": 1}
+
+
+def test_subscriber_counts_on_an_empty_table(store):
+    assert store.subscriber_counts() == {"contacts": 0, "opted_in": 0}

@@ -3,9 +3,10 @@
 A weekly pipeline that scrapes Islamabad event listings, deduplicates them,
 renders a digest, and delivers it.
 
-> Delivery is mid-migration from Telegram (banned in Pakistan) to WhatsApp.
-> The `send` command still speaks Telegram; the weekly cron deliberately does
-> not send at all yet. See `CLAUDE.md` § Delivery.
+> Delivery is pull, not push: the WhatsApp bot in `bot/` replies with the
+> stored digest when someone asks. The cron renders and stops; `send` has no
+> push channel until the Phase 2 nudge template exists. Telegram has been
+> removed — it is banned in Pakistan. See `CLAUDE.md` § Delivery.
 
 ## Quickstart
 
@@ -21,7 +22,7 @@ uv run isb-events run --dry-run --week-of 2026-08-24
 |----------|---------------------------------------------------|
 | `fetch`  | Scrape enabled sources into the store             |
 | `render` | Render stored events into the `digests` row       |
-| `send`   | Read the stored digest and deliver it             |
+| `send`   | Print the stored digest (`--dry-run`); no push channel yet |
 | `run`    | `fetch` → `render` → `send` in one shot           |
 
 All take `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming Mon–Sun).
@@ -30,7 +31,6 @@ All take `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming Mon–Sun).
 
 - Sources are declared in `sources.yaml` (`enabled` flag per source).
 - Storage: see [Storage](#storage) below.
-- Delivery: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 ## Storage
 

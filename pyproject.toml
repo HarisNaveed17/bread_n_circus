@@ -1,7 +1,7 @@
 [project]
 name = "isb-events"
 version = "0.1.0"
-description = "Weekly digest of Islamabad events, scraped, deduplicated, and delivered to Telegram."
+description = "Weekly digest of Islamabad events, scraped, deduplicated, and served over WhatsApp."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

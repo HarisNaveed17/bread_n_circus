@@ -5,9 +5,9 @@ renders a digest, and delivers it on a GitHub Actions cron. Full usage/config
 docs live in `README.md` — this file is project memory and working notes for
 future sessions, not a duplicate of it.
 
-**Delivery is moving from Telegram to WhatsApp** — see [Delivery](#delivery).
-`README.md`, `render.py`, `notify/`, and the CLI still say/assume Telegram;
-that's accurate to the code today, not to the plan.
+**Delivery is WhatsApp, pull not push** — see [Delivery](#delivery). Telegram
+is gone from the code entirely. What is *not* built is the Phase 2 nudge, so
+`send` has no push channel and says so.
 
 ## Quickstart
 
@@ -41,10 +41,13 @@ datetimes are timezone-aware in `Asia/Karachi`.
 - `normalize.py` — sets `series_key` (strips trailing "Session: N" markers) so
   `render.py` can collapse recurring series into one line. `dedupe()` is a
   pass-through until M3.
-- `render.py` — pure function, `Event`s → Telegram MarkdownV2 message list.
-  Needs a WhatsApp flavor before delivery switches; see [Delivery](#delivery).
+- `render.py` — pure function, `Event`s → WhatsApp message list. No escaping
+  and no `[text](url)`: WhatsApp is not Markdown. See [Delivery](#delivery).
 - `store.py` — thin sqlite/libSQL wrapper, upsert-by-id, no ORM.
-- `cli.py` — Typer app: `fetch` / `render` / `send` / `run`.
+- `cli.py` — Typer app: `fetch` / `render` / `send` / `run`. `send` prints
+  under `--dry-run` and otherwise reports that there is no push channel.
+- `notify/base.py` — the `Notifier` seam. `DryRunNotifier` is the only
+  implementation; the nudge sender lands in Phase 2.
 - `bot/` + `api/webhook.py` — the WhatsApp webhook (Phase 1). Stands apart
   from the package on purpose: it imports no `isb_events` and no libSQL
   driver, reaching Turso over the HTTP API instead. `bot/app.py` holds the
@@ -184,17 +187,17 @@ SIM's one-shot registration shouldn't be in play until the thing works.
 
 Smaller than it looks — `notify/base.py` was written for exactly this swap:
 
-1. **`notify/whatsapp.py`** — a `Notifier` that sends the nudge template.
-   Drops in beside `DryRunNotifier`; `cli.py`'s `_notifier()` switches to it.
-2. **`render.py` needs a WhatsApp flavor** — the one real change. It currently
-   emits Telegram MarkdownV2, which backslash-escapes `.` `-` `!` etc.
-   WhatsApp wants bare `*bold*` and **no** escaping, so `escape_md2` must not
-   run. Cleanest: inject the escape fn + bold wrapper into `_event_line` /
-   `_pack` rather than fork the renderer. Message cap is 4096 on both, so
-   `_pack`'s splitting logic carries over untouched. Telegram is being dropped
-   outright, so no dual-flavor storage is needed — just switch what `render`
-   writes.
-3. **The webhook** — new, ~40 lines, outside the package (`bot/`).
+1. **`notify/whatsapp.py`** — still to build (Phase 2): a `Notifier` that
+   sends the nudge template to `Store.opted_in_subscribers()`. Telegram's
+   notifier is deleted, so `_notifier()` currently has nothing to return for
+   a real send and exits with an explanation.
+2. **`render.py` WhatsApp flavour — done** (`51abfed`). Switched outright
+   rather than dual-flavoured, since Telegram was being dropped anyway.
+   `escape_md2` is deleted; `[text](url)` is gone too, which the original plan
+   missed — WhatsApp has no link syntax and renders it literally, so URLs sit
+   on their own line and are auto-linked. `_pack`'s 4096 splitting carried
+   over untouched.
+3. **The webhook — done** (`021e1ea`): `bot/` plus `api/webhook.py`.
 
 Hosting: **Vercel Python function + Turso's HTTP API** (free tier, stays in
 Python, HTTPS from a `git push`). Use Turso over HTTP, *not* the
