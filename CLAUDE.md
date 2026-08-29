@@ -240,12 +240,25 @@ Checkable in seconds — verify rather than trust, this list goes stale.
    of 2026-08-31). So secrets, database, and the libSQL path are all proven.
    What has never happened is a *scheduled* run: the 2026-08-29 05:00 UTC
    firing simply did not occur, with the workflow active, the repo public,
-   and the cron on the default branch. Nothing was misconfigured — GitHub's
-   scheduler is best-effort and drops top-of-hour jobs under load, so the
-   cron moved to `17 5 * * 6`. Whether that is enough is unknown until a
-   Saturday passes. **A missed week is expected behaviour, not a bug**; the
-   fallback is `gh workflow run weekly-digest.yml`. If it keeps missing, the
-   fix is an external trigger, not more workflow tuning.
+   and the cron on the default branch. Nothing was misconfigured.
+
+   `schedule:` is not cron(8). It borrows the syntax, but it is a request to
+   a shared multi-tenant event producer: GitHub evaluates every repo's
+   schedule, enqueues an event, then allocates a runner, and all three stages
+   are contended. There is no catch-up for a missed firing and no punctuality
+   SLA — the docs promise only that runs "may be delayed during periods of
+   high load" and advise avoiding the start of the hour. Hence the move to
+   `17 5 * * 6`. Be careful repeating the stronger claim that GitHub *drops*
+   these: what was actually observed here is one absent run at 05:00 UTC and
+   still absent at 07:10, which does not distinguish dropped from
+   indefinitely delayed.
+
+   **Treat a missed week as expected, not as a bug**; the fallback is
+   `gh workflow run weekly-digest.yml`. If it keeps missing, the fix is a
+   trigger on hardware someone controls (a real crontab calling the
+   `workflow_dispatch` REST endpoint), not more workflow tuning. This is low
+   stakes while nobody is messaging the bot: a late cron means a stale digest
+   for a few hours, not an outage.
 2. **Turso is wired but unprovisioned** — the database doesn't exist yet.
    Creating it and setting the two secrets is written up in `README.md`
    § Storage. The old worry here (would `libsql-experimental`, a compiled
