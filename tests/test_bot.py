@@ -391,3 +391,68 @@ def test_send_surfaces_the_graph_error_body(monkeypatch):
     monkeypatch.setattr(whatsapp.httpx, "post", lambda url, **kw: _Resp())
     with pytest.raises(RuntimeError, match="Recipient not in allowed list"):
         whatsapp.send_text("923236501038", "hi")
+
+
+# -- the WSGI entrypoint -----------------------------------------------------
+#
+# Vercel serves `api.webhook:app`, so the adapter is part of the contract:
+# a mistake in header mangling or body reading breaks the webhook while every
+# test above still passes.
+
+
+def _wsgi_call(method="GET", query="", body=b"", headers=None):
+    from io import BytesIO
+
+    from api.webhook import app as wsgi_app
+
+    environ = {
+        "REQUEST_METHOD": method,
+        "QUERY_STRING": query,
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": BytesIO(body),
+        **(headers or {}),
+    }
+    captured = {}
+
+    def start_response(status, response_headers):
+        captured["status"] = status
+        captured["headers"] = dict(response_headers)
+
+    chunks = wsgi_app(environ, start_response)
+    return captured["status"], b"".join(chunks).decode()
+
+
+def test_wsgi_get_echoes_the_challenge():
+    status, body = _wsgi_call(
+        query=f"hub.mode=subscribe&hub.verify_token={VERIFY_TOKEN}&hub.challenge=1158201444"
+    )
+    assert status.startswith("200")
+    assert body == "1158201444"
+
+
+def test_wsgi_get_rejects_a_wrong_token():
+    status, _ = _wsgi_call(query="hub.mode=subscribe&hub.verify_token=nope&hub.challenge=x")
+    assert status.startswith("403")
+
+
+def test_wsgi_post_reads_the_signature_header(sent, stored_digest, writes):
+    """WSGI mangles X-Hub-Signature-256 into HTTP_X_HUB_SIGNATURE_256."""
+    raw, sig = _signed(_message_payload())
+    status, body = _wsgi_call(
+        method="POST", body=raw, headers={"HTTP_X_HUB_SIGNATURE_256": sig}
+    )
+    assert status.startswith("200")
+    assert body == "ok"
+    assert [b for _, b in sent] == [DIGEST]
+
+
+def test_wsgi_post_without_a_signature_is_rejected(sent, stored_digest, writes):
+    raw, _ = _signed(_message_payload())
+    status, _ = _wsgi_call(method="POST", body=raw)
+    assert status.startswith("403")
+    assert sent == []
+
+
+def test_wsgi_rejects_other_methods():
+    status, _ = _wsgi_call(method="DELETE")
+    assert status.startswith("405")

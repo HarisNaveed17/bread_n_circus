@@ -42,3 +42,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider"
 testpaths = ["tests"]
+
+[tool.vercel]
+# Vercel's Python runtime serves one app per project and will not guess: several
+# modules here define a name called `app` (the Typer CLI, our own bot.app), and
+# it refuses to pick between them. This names the WSGI callable explicitly.
+entrypoint = "api.webhook:app"

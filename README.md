@@ -92,7 +92,7 @@ run summary either way.
 ## WhatsApp bot (Phase 1)
 
 `bot/` answers any inbound WhatsApp message with the latest stored digest;
-`api/webhook.py` is the Vercel entrypoint. It never imports `isb_events` — it
+`api/webhook.py` is the Vercel entrypoint, a bare WSGI callable. It never imports `isb_events` — it
 reads Turso over the HTTP API with plain `httpx`, because the pipeline's libSQL
 driver is a compiled extension and a poor fit for a serverless runtime. The two
 sides share a database table, not a process.
@@ -139,9 +139,11 @@ Framework preset **Other**; leave the root directory alone. There is nothing
 to build: Vercel serves each file under `api/` as a Python function and
 installs `requirements.txt`.
 
-`vercel.json` exists for one reason — `includeFiles: "bot/**"`. Vercel bundles
-the entrypoint, not the whole repo, so without it `api/webhook.py` deploys
-fine and then fails at runtime on `from bot import app`.
+The runtime serves **one** WSGI app per project and will not guess which:
+several modules here expose a name called `app`. `[tool.vercel] entrypoint` in
+`pyproject.toml` names it explicitly as `api.webhook:app`. Without that the
+build fails before it starts, with "No python entrypoint found in default
+locations".
 
 Add the six environment variables in the project settings (these are separate
 from the GitHub secrets; GitHub runs the cron, Vercel runs the bot, and both
