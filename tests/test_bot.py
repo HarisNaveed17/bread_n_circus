@@ -438,9 +438,7 @@ def test_wsgi_get_rejects_a_wrong_token():
 def test_wsgi_post_reads_the_signature_header(sent, stored_digest, writes):
     """WSGI mangles X-Hub-Signature-256 into HTTP_X_HUB_SIGNATURE_256."""
     raw, sig = _signed(_message_payload())
-    status, body = _wsgi_call(
-        method="POST", body=raw, headers={"HTTP_X_HUB_SIGNATURE_256": sig}
-    )
+    status, body = _wsgi_call(method="POST", body=raw, headers={"HTTP_X_HUB_SIGNATURE_256": sig})
     assert status.startswith("200")
     assert body == "ok"
     assert [b for _, b in sent] == [DIGEST]
