@@ -555,3 +555,34 @@ def test_health_flags_a_missing_subscribers_table(monkeypatch, stored_digest):
 def test_health_reports_a_present_subscribers_table(monkeypatch, stored_digest):
     monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
     assert "subscribers: table present" in app.handle_health(VERIFY_TOKEN)[1]
+
+
+def test_subscribe_requires_a_waba_id(monkeypatch, capsys):
+    from bot import selftest
+
+    monkeypatch.delenv("WHATSAPP_WABA_ID", raising=False)
+    assert selftest.subscribe() == 1
+    assert "WHATSAPP_WABA_ID" in capsys.readouterr().out
+
+
+def test_subscribe_posts_to_subscribed_apps(monkeypatch, capsys):
+    from bot import selftest
+
+    monkeypatch.setenv("WHATSAPP_WABA_ID", "WABA9")
+    calls = []
+    monkeypatch.setattr(
+        whatsapp, "graph_post", lambda path: (calls.append(path), {"success": True})[1]
+    )
+    assert selftest.subscribe() == 0
+    assert calls == ["WABA9/subscribed_apps"]
+
+
+def test_subscribe_surfaces_a_graph_error(monkeypatch, capsys):
+    from bot import selftest
+
+    monkeypatch.setenv("WHATSAPP_WABA_ID", "WABA9")
+    monkeypatch.setattr(
+        whatsapp, "graph_post", lambda path: {"error": {"message": "(#200) Permissions"}}
+    )
+    assert selftest.subscribe() == 1
+    assert "(#200) Permissions" in capsys.readouterr().out

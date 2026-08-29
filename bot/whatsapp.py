@@ -101,6 +101,24 @@ def graph_get(path: str, params: dict | None = None) -> dict:
         return {"error": {"message": f"HTTP {resp.status_code}: {resp.text[:200]}"}}
 
 
+def graph_post(path: str) -> dict:
+    """POST to a Graph node with no body. Diagnostics/setup only.
+
+    Returns the error body rather than raising, for the same reason as
+    `graph_get`: Graph's own message is the useful part.
+    """
+    token = os.environ["WHATSAPP_TOKEN"]
+    resp = httpx.post(
+        f"https://graph.facebook.com/{GRAPH_VERSION}/{path.lstrip('/')}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=TIMEOUT,
+    )
+    try:
+        return resp.json()
+    except ValueError:
+        return {"error": {"message": f"HTTP {resp.status_code}: {resp.text[:200]}"}}
+
+
 def send_text(to: str, body: str) -> dict:
     """Free-form text. Deliverable only inside an open 24-hour service window."""
     return _post({"to": to, "type": "text", "text": {"body": body, "preview_url": False}})

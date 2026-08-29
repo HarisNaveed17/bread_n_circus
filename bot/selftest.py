@@ -4,6 +4,7 @@
     uv run python -m bot.selftest 923001234567     # free-form text
     uv run python -m bot.selftest 923001234567 -t  # hello_world template
     uv run python -m bot.selftest --diagnose       # is the WABA subscribed?
+    uv run python -m bot.selftest --subscribe      # ...subscribe it if not
 
 Everything in `bot/whatsapp.py` was written from Meta's docs and has never
 been exercised against the live API, so this exists to find the mismatch
@@ -69,9 +70,33 @@ def diagnose() -> int:
     return 0
 
 
+def subscribe() -> int:
+    """Subscribe the app to the WhatsApp Business Account.
+
+    The dashboard toggle for this is easy to miss and does not always take.
+    This is the same call it makes, and it is idempotent.
+    """
+    from . import whatsapp
+
+    waba_id = os.environ.get("WHATSAPP_WABA_ID")
+    if not waba_id:
+        print("Set WHATSAPP_WABA_ID (API Setup page) first.")
+        return 1
+
+    result = whatsapp.graph_post(f"{waba_id}/subscribed_apps")
+    if "error" in result:
+        print(f"subscribe: ERROR — {result['error'].get('message')}")
+        return 1
+    print(f"subscribe: {result}")
+    print("Re-run --diagnose to confirm, then text the number again.")
+    return 0
+
+
 def main() -> int:
     if "--diagnose" in sys.argv:
         return diagnose()
+    if "--subscribe" in sys.argv:
+        return subscribe()
 
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     for name in REQUIRED:
