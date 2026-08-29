@@ -130,8 +130,24 @@ The recipient has to be on the test number's allowlist. That command exercises
 the same `send_text` the webhook uses, so it fails on exactly what a live
 webhook would fail on — before Meta is in the loop.
 
-Then deploy, point Meta at `https://<deployment>/api/webhook` with the same
-`WHATSAPP_VERIFY_TOKEN`, and subscribe to the `messages` field. The test
+### Deploying
+
+At vercel.com, sign in with GitHub → **Add New → Project** → import this repo.
+Framework preset **Other**; leave the root directory alone. There is nothing
+to build: Vercel serves each file under `api/` as a Python function and
+installs `requirements.txt`.
+
+`vercel.json` exists for one reason — `includeFiles: "bot/**"`. Vercel bundles
+the entrypoint, not the whole repo, so without it `api/webhook.py` deploys
+fine and then fails at runtime on `from bot import app`.
+
+Add the six environment variables in the project settings (these are separate
+from the GitHub secrets; GitHub runs the cron, Vercel runs the bot, and both
+need the Turso pair), then deploy. The webhook is at
+`https://<project>.vercel.app/api/webhook`.
+
+Then point Meta at that URL with the same `WHATSAPP_VERIFY_TOKEN`, and
+subscribe to the `messages` field. The test
 number only reaches allowlisted recipients, but its webhooks are real, so the
 one-shot registration of a real SIM stays out of play until the bot works.
 
