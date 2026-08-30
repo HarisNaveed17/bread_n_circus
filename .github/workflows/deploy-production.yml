@@ -69,13 +69,8 @@ jobs:
         # Project Settings … remove the `.vercel` directory", which is wrong
         # and unactionable on a runner that has no `.vercel` directory. This
         # makes the same call directly and says what actually happened.
-        #
-        # The length is printed because GitHub masks a secret's value but not
-        # its length: a token pasted interactively into `gh secret set` often
-        # carries a trailing newline, which is invisible everywhere else.
         run: |
           set -euo pipefail
-          echo "token length: ${#VERCEL_TOKEN} (expected: no trailing newline)"
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID")
