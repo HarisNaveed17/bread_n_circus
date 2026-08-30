@@ -17,6 +17,7 @@ uv run isb-events run --dry-run          # end to end, prints, persists nothing
 uv run isb-events run --dry-run --week-of 2026-08-24
 uv run pytest          # offline — no test touches the network
 uv run ruff check . && uv run ruff format .
+git config core.hooksPath hooks   # once per clone; enforces the commit format
 ```
 
 Commands: `fetch` (scrape enabled sources into the store) → `render` (render
@@ -114,6 +115,44 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   persisted nothing. `workflow_dispatch` takes an optional `week_of`, and the
   digest is echoed into the run summary so you can eyeball it without opening
   Turso. Not tied to a numbered milestone.
+
+## CI and deploys
+
+Added 2026-08-30, after the pipeline was proven end to end. Three moving
+parts, and the non-obvious one is the third.
+
+- **Commit format.** `<tag>: description`, tag one of
+  `docs|tests|feat|fix|refactor`, under 72 chars, no full stop.
+  `hooks/commit-msg` is a single Python file that is *also* CI's checker
+  (`hooks/commit-msg --range A..B`) — deliberately one file, so the local hook
+  and the workflow cannot drift. Not Node commitlint: a `package.json` at the
+  root risks Vercel re-detecting this as a Node project, and the rule is a
+  regex. History before this point does not comply; CI only checks the commits
+  a push introduces.
+- **`ci.yml`** — every push and PR: subjects, `ruff check`, `ruff format
+  --check`, `pytest`. Then, on pushes whose tip commit is `feat`/`fix`/
+  `refactor` only, a Vercel *preview* deploy followed by
+  `GET /api/webhook?health=` against the new URL. `docs:`/`tests:` commits
+  cannot change what the function serves, so they do not spend a deploy.
+- **`deploy-production.yml`** — `workflow_dispatch` only. Optional `sha` input
+  pins the deploy to the commit whose preview was verified; it re-runs the
+  checks rather than trusting that CI ever saw that sha.
+
+**The thing that makes this work is one line in `vercel.json`:**
+`git.deploymentEnabled: false`. Vercel's Git integration would otherwise treat
+every push to master as a production deploy, and no amount of workflow
+configuration would stop it — the deploy is created by Vercel, not by us. With
+it off, Vercel builds nothing on push, and the CLI in Actions does the build
+(`vercel pull` → `vercel build` → `vercel deploy --prebuilt`). Corollary: the
+Vercel dashboard's "Deployments from Git" goes quiet; a missing preview after
+a push is a *workflow* failure, not a Vercel one.
+
+Two setup facts that only bite at runtime: the bot's env vars must be set for
+the **Preview** environment in Vercel too (otherwise the health check fails on
+`MISSING` — which is the check doing its job), and if Deployment Protection is
+left on for previews, the smoke test needs
+`VERCEL_AUTOMATION_BYPASS_SECRET` as a repo secret. curl can send the bypass
+header; Meta cannot, which is why production protection stays off.
 
 ## Delivery
 
@@ -251,6 +290,12 @@ per-message pricing during 2025 and the rate card shifts. Check the live
 pricing page before committing to any number.
 
 ## Open threads
+
+Live diagnostics — the commands, their expected output, and what each Graph
+error code means — live in `RUNBOOK.md`. Prefer running those over reasoning
+about what might be wrong; every entry there is something that actually
+happened.
+
 
 Checkable in seconds — verify rather than trust, this list goes stale.
 

@@ -159,7 +159,81 @@ Replies are free-form text, which the Cloud API allows only inside the 24-hour
 window a user opens by messaging first — so Phase 1 costs nothing and needs no
 approved template. The weekly nudge template is Phase 2.
 
+**Deployments no longer come from Vercel's Git integration.** `vercel.json`
+sets `git.deploymentEnabled: false`, so a push to master builds nothing on
+Vercel's side; GitHub Actions builds and uploads instead. See
+[Deployment flow](#deployment-flow).
+
+When something breaks, `RUNBOOK.md` has the diagnostic commands and how to
+read their output.
+
+## Deployment flow
+
+Nothing reaches production automatically. Pushing to master gets you a preview
+URL and a health check against it; promoting that to production is a button
+you press.
+
+```
+push (any branch)                       you, in the Actions tab
+      |                                          |
+  commit subjects + ruff + pytest                |
+      |                                          |
+  tip commit is feat/fix/refactor?               |
+      | yes                                      |
+  vercel build && deploy  ->  preview URL        |
+      |                                          |
+  GET /api/webhook?health=  (Turso reachable?)   |
+                                                 v
+                            deploy-production.yml (workflow_dispatch)
+                            re-runs the checks, builds --prod, health-checks
+                            the production alias
+```
+
+`docs:` and `tests:` commits skip the deploy entirely — they cannot change
+what the function serves.
+
+To ship, run **Deploy production** from the Actions tab (or
+`gh workflow run deploy-production.yml -f sha=<commit> -f reason='...'`).
+Leaving `sha` blank ships the tip of the branch you dispatched from; setting
+it pins the deploy to the exact commit whose preview you verified.
+
+### One-time setup
+
+Repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Where it comes from |
+| --- | --- |
+| `VERCEL_TOKEN` | vercel.com → Account Settings → Tokens |
+| `WHATSAPP_VERIFY_TOKEN` | the value already in the Vercel project; the health check is gated on it |
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | only if Deployment Protection stays on for previews (Vercel → Settings → Deployment Protection → Protection Bypass for Automation) |
+
+Repository **variables**, not secrets — these are identifiers, not
+credentials, and GitHub masks secrets as `***` in logs, which hides the one
+thing you need to read when a deploy targets the wrong project:
+
+| Variable | Where it comes from |
+| --- | --- |
+| `VERCEL_ORG_ID` | `.vercel/project.json` after a local `vercel link` |
+| `VERCEL_PROJECT_ID` | same file |
+| `PRODUCTION_URL` | the stable alias, `https://<project>.vercel.app`, so the production health check hits what Meta's callback points at rather than the fresh deploy's hashed URL |
+
+In the Vercel project, set the six bot environment variables for the
+**Preview** environment as well as Production. Without them the preview
+deploys fine and the health check fails on `MISSING`, which is the point of
+having it.
+
 ## Development
+
+Install the commit hook once per clone:
+
+```bash
+git config core.hooksPath hooks
+```
+
+Commit subjects must read `<tag>: short description of work`, with the tag one
+of `docs`, `tests`, `feat`, `fix`, `refactor` — under 72 characters, no full
+stop. `hooks/commit-msg` enforces it locally and CI re-runs the same file over
+every pushed commit, so `--no-verify` only defers the rejection.
 
 ```bash
 uv run pytest          # offline — no test touches the network
