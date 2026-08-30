@@ -193,6 +193,50 @@ Nothing deploys from Vercel's side any more — `vercel.json` sets
 `git.deploymentEnabled: false`. A missing preview is a *workflow* failure, and
 the Vercel dashboard will have nothing to show.
 
+## Symptom: `vercel pull` says "Could not retrieve Project Settings"
+
+```
+Error: Could not retrieve Project Settings. To link your Project,
+remove the `.vercel` directory and deploy again.
+```
+
+**Ignore the advice in that message.** A runner has no `.vercel` directory —
+it is gitignored — and deleting the local one changes nothing about CI. The
+message is the CLI's catch-all for "I could not establish an account context",
+and the real cause is almost always the token.
+
+Establish which layer is broken, in this order:
+
+```bash
+T='the token'                                   # not the GitHub secret; the value
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $T" \
+  "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $T" \
+  "https://api.vercel.com/v2/user"
+```
+
+| project | /v2/user | Diagnosis |
+| --- | --- | --- |
+| 200 | 200 | Token is fine; the problem is elsewhere. |
+| 200 | 404 | **Team-scoped token.** See below — this is the common one. |
+| 403 | — | The token has no access to that team. |
+| 401 | 401 | Bad value: a truncated copy, or a trailing newline from an interactive `gh secret set`. |
+
+**Observed 2026-08-30.** A `vcp_` personal access token created with **Team
+scope** is restricted to team-level resources and blocked from `/v2/user` by
+design. Every Vercel CLI command preflights against `/v2/user`, so such a
+token reads projects perfectly over REST and fails on every single CLI
+invocation. Symptoms that mislead: `vercel whoami --token=…` returns
+`User not found (404)`, adding `--scope` does not help, and the same commands
+work locally because `vercel login` uses a session rather than the token.
+
+Fix: recreate the token at vercel.com/account/tokens with **Full Account**
+scope, not Team scope. Team membership still grants access to the team's
+projects, and `VERCEL_ORG_ID` selects which one.
+
+Both deploy workflows now run this pair as a preflight, so a future occurrence
+fails in the first ten seconds with the scope named.
+
 ## Symptom: a config change in Vercel had no effect
 
 Vercel bakes environment variables into a deployment when it is built.

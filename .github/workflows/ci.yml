@@ -134,6 +134,22 @@ jobs:
                       "gh secret set VERCEL_TOKEN --body \"\$(tr -d '\\n' < token.txt)\""; exit 1 ;;
           esac
 
+          # Reading the project is NOT enough. Every CLI command preflights
+          # against /v2/user, and a `vcp_` token created with *Team* scope is
+          # blocked from that endpoint by design — so it passes the check above
+          # and then fails as "Could not retrieve Project Settings", which
+          # names neither the token nor the scope. Cost an evening on
+          # 2026-08-30. The token must be created with FULL ACCOUNT scope.
+          user=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $VERCEL_TOKEN" "https://api.vercel.com/v2/user")
+          echo "GET /v2/user -> HTTP $user"
+          if [ "$user" != 200 ]; then
+            echo "::error::the token can read the project but not /v2/user (HTTP $user)," \
+                 "which means it was created with Team scope. The Vercel CLI needs a" \
+                 "token with Full Account scope — recreate it at vercel.com/account/tokens."
+            exit 1
+          fi
+
       - name: Install the Vercel CLI
         if: steps.gate.outputs.deploy == 'true'
         run: npm install --global vercel@latest
