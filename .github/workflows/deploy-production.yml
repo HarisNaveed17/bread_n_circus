@@ -64,6 +64,30 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q
 
+      - name: Can the token see the project?
+        # `vercel pull` reports every auth failure as "Could not retrieve
+        # Project Settings … remove the `.vercel` directory", which is wrong
+        # and unactionable on a runner that has no `.vercel` directory. This
+        # makes the same call directly and says what actually happened.
+        #
+        # The length is printed because GitHub masks a secret's value but not
+        # its length: a token pasted interactively into `gh secret set` often
+        # carries a trailing newline, which is invisible everywhere else.
+        run: |
+          set -euo pipefail
+          echo "token length: ${#VERCEL_TOKEN} (expected: no trailing newline)"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID")
+          echo "GET /v9/projects/$VERCEL_PROJECT_ID -> HTTP $code"
+          case "$code" in
+            200) ;;
+            403) echo "::error::the token is valid but has no access to $VERCEL_ORG_ID"; exit 1 ;;
+            404) echo "::error::no such project in that team, or the token cannot see it"; exit 1 ;;
+            *)   echo "::error::token rejected (HTTP $code). Re-set the secret with" \
+                      "gh secret set VERCEL_TOKEN --body \"\$(tr -d '\\n' < token.txt)\""; exit 1 ;;
+          esac
+
       - name: Install the Vercel CLI
         run: npm install --global vercel@latest
 
