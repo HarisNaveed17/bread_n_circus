@@ -7,3 +7,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+
+# `vercel pull` writes the linked project id here. Local scratch, never committed.
+.vercel/
+.vercel
+.env*

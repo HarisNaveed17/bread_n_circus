@@ -1,0 +1,169 @@
+name: CI
+
+# Every push and every PR: check the commit subjects, run the test suite, and
+# — only for commits that change what the function serves — put the result on
+# a Vercel preview URL and prove it answers.
+#
+# Production is deliberately not reachable from here. See deploy-production.yml.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  # Per-branch: a second push supersedes the first, and cancelling a superseded
+  # preview build is free. (The weekly digest cron uses its own group.)
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  commits:
+    name: Commit subjects
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default shallow clone has no history to walk, so `git log A..B`
+          # would fail on anything but a single-commit push.
+          fetch-depth: 0
+
+      - name: Check subjects against hooks/commit-msg
+        # Same file the local hook runs, so a `--no-verify` push still gets
+        # caught here rather than landing.
+        env:
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # `sha^!` is git's "just this one commit" range; it holds even for a
+          # root commit, which `sha~1..sha` does not.
+          range="$HEAD_SHA^!"
+          if [ -n "$BASE_SHA" ]; then
+            range="$BASE_SHA..$HEAD_SHA"
+          elif [ -n "${BEFORE:-}" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            # Skipped for a brand-new branch (`before` is all zeros) and after a
+            # force-push, where the old tip may no longer be fetchable at all.
+            range="$BEFORE..$HEAD_SHA"
+          fi
+          echo "range: $range"
+          python3 hooks/commit-msg --range "$range"
+
+  checks:
+    name: Lint and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --extra pipeline: the base set is the bot's only (see pyproject.toml),
+      # and the tests import scrapers, pydantic and the store.
+      - run: uv sync --frozen --extra pipeline
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      # Offline by construction — every scraper test runs off a fixture.
+      - run: uv run pytest -q
+
+  preview:
+    name: Deploy preview
+    needs: [commits, checks]
+    # Pushes only. A PR from a fork cannot see the Vercel secrets anyway, and a
+    # same-repo PR's branch push already got a preview of its own.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: preview
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Does this commit change what gets served?
+        id: gate
+        # docs: and tests: commits cannot alter the function's behaviour, so
+        # they do not spend a deployment. The tag was already validated by the
+        # `commits` job, so anything unrecognised here is a merge commit.
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --format=%s)
+          echo "subject: $subject"
+          case "$subject" in
+            feat:*|fix:*|refactor:*) echo "deploy=true"  >> "$GITHUB_OUTPUT" ;;
+            *)                       echo "deploy=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Skip note
+        if: steps.gate.outputs.deploy != 'true'
+        run: |
+          echo "No deploy: the tip commit is not feat/fix/refactor." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the Vercel CLI
+        if: steps.gate.outputs.deploy == 'true'
+        run: npm install --global vercel@latest
+
+      - name: Build and deploy to a preview URL
+        if: steps.gate.outputs.deploy == 'true'
+        id: deploy
+        # Built here rather than on Vercel's builders: the Git integration is
+        # switched off in vercel.json (that is what keeps master off prod), so
+        # the CLI has to bring its own build. --prebuilt uploads .vercel/output.
+        run: |
+          set -euo pipefail
+          vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+          vercel build --token="$VERCEL_TOKEN"
+          url=$(vercel deploy --prebuilt --token="$VERCEL_TOKEN" \
+                  --meta githubCommitSha="$GITHUB_SHA")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "preview: $url"
+
+      - name: Prove the deployment answers
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERIFY_TOKEN: ${{ secrets.WHATSAPP_VERIFY_TOKEN }}
+          # Optional. Only needed if Deployment Protection is left on for
+          # preview URLs; unlike Meta, curl can send the bypass header.
+          BYPASS: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        # ?health= is the one check that cannot be made from outside: it asks
+        # *this deployment* whether it can read the digest out of Turso. A 200
+        # from the webhook path alone would also be returned by a broken store.
+        run: |
+          set -euo pipefail
+          args=(--silent --show-error --fail-with-body --max-time 30)
+          if [ -n "${BYPASS:-}" ]; then
+            args+=(-H "x-vercel-protection-bypass: $BYPASS")
+          fi
+          body=$(curl "${args[@]}" "$URL/api/webhook?health=$VERIFY_TOKEN")
+          echo "$body"
+          {
+            echo "### Preview"
+            echo
+            echo "$URL"
+            echo
+            echo '```'
+            echo "$body"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # `forbidden` is a 200 from the health gate with a wrong token, so
+          # --fail-with-body would not have caught it.
+          case "$body" in
+            forbidden*) echo "::error::health check rejected the verify token"; exit 1 ;;
+          esac
+          case "$body" in
+            *UNREACHABLE*|*MISSING*)
+              echo "::error::the preview cannot reach Turso or is missing env vars." \
+                   "Set them for the Preview environment in the Vercel project."
+              exit 1 ;;
+          esac

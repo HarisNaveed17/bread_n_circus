@@ -1,0 +1,113 @@
+name: Deploy production
+
+# The only path to production. Nothing else in this repo can reach it:
+# vercel.json sets `git.deploymentEnabled: false`, so pushing to master builds
+# a preview (see ci.yml) and stops there.
+#
+# Run it from the Actions tab, or:
+#     gh workflow run deploy-production.yml -f sha=<the commit you verified>
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to ship. Blank = the tip of the branch you dispatched."
+        required: false
+        type: string
+      reason:
+        description: "What is going out (shown in the run summary)."
+        required: false
+        type: string
+
+concurrency:
+  # Never two production deploys in flight; and unlike CI, do not cancel one
+  # halfway — an interrupted `vercel deploy --prod` is worse than a queued one.
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      # Read through the environment, never interpolated into a run block:
+      # `${{ inputs.* }}` inline in a shell script is a script-injection hole.
+      SHA: ${{ inputs.sha }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out the requested commit
+        run: |
+          set -euo pipefail
+          if [ -n "${SHA:-}" ]; then
+            git checkout --detach "$SHA"
+          fi
+          echo "shipping $(git rev-parse --short HEAD) — $(git log -1 --format=%s)"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Re-run the gate rather than trusting that CI ever saw this commit —
+      # a dispatch can name any sha, including one that was never pushed green.
+      - run: uv sync --frozen --extra pipeline
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Build and deploy to production
+        id: deploy
+        run: |
+          set -euo pipefail
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          vercel build --prod --token="$VERCEL_TOKEN"
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN" \
+                  --meta githubCommitSha="$(git rev-parse HEAD)")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "deployed: $url"
+
+      - name: Prove production answers
+        env:
+          # The stable alias, not the per-deploy hashed URL: the alias is what
+          # Meta's callback points at, so it is the thing that has to be right.
+          # (The hashed URL would pass while the alias still served the old
+          # build.) Falls back to the fresh deployment URL if unset.
+          ALIAS: ${{ vars.PRODUCTION_URL }}
+          FRESH: ${{ steps.deploy.outputs.url }}
+          VERIFY_TOKEN: ${{ secrets.WHATSAPP_VERIFY_TOKEN }}
+        run: |
+          set -euo pipefail
+          target="${ALIAS:-$FRESH}"
+          body=$(curl --silent --show-error --fail-with-body --max-time 30 \
+                   "$target/api/webhook?health=$VERIFY_TOKEN")
+          echo "$body"
+          {
+            echo "### Production"
+            echo
+            echo "- deployment: $FRESH"
+            echo "- checked: $target"
+            if [ -n "${REASON:-}" ]; then echo "- reason: $REASON"; fi
+            echo
+            echo '```'
+            echo "$body"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$body" in
+            forbidden*) echo "::error::health check rejected the verify token"; exit 1 ;;
+            *UNREACHABLE*|*MISSING*)
+              echo "::error::production is missing env vars or cannot reach Turso." \
+                   "It is LIVE in this state — roll back in the Vercel dashboard."
+              exit 1 ;;
+          esac
