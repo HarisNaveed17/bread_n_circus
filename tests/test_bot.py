@@ -586,3 +586,30 @@ def test_subscribe_surfaces_a_graph_error(monkeypatch, capsys):
     )
     assert selftest.subscribe() == 1
     assert "(#200) Permissions" in capsys.readouterr().out
+
+
+def test_token_status_flags_a_temporary_token(monkeypatch):
+    import datetime
+
+    from bot import selftest
+
+    soon = int((datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=3)).timestamp())
+    monkeypatch.setattr(whatsapp, "graph_get", lambda p, q=None: {"data": {"expires_at": soon}})
+    status = selftest._token_status()
+    assert "TEMPORARY" in status and "System User" in status
+
+
+def test_token_status_recognises_a_permanent_token(monkeypatch):
+    from bot import selftest
+
+    monkeypatch.setattr(whatsapp, "graph_get", lambda p, q=None: {"data": {"expires_at": 0}})
+    assert "never expires" in selftest._token_status()
+
+
+def test_token_status_reports_rejection(monkeypatch):
+    from bot import selftest
+
+    monkeypatch.setattr(
+        whatsapp, "graph_get", lambda p, q=None: {"error": {"message": "Session has expired"}}
+    )
+    assert "REJECTED" in selftest._token_status()

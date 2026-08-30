@@ -37,6 +37,37 @@ REQUIRED = [
 ]
 
 
+def _token_status() -> str:
+    """When does WHATSAPP_TOKEN die?
+
+    The API Setup page hands out short-lived tokens and does not say so on the
+    way past, so the bot goes quiet hours later with no deploy having changed.
+    A System User token reports `never`; anything with a date is temporary.
+    """
+    import datetime
+
+    from . import whatsapp
+
+    token = os.environ["WHATSAPP_TOKEN"]
+    body = whatsapp.graph_get("debug_token", {"input_token": token, "access_token": token})
+    if "error" in body:
+        return f"Token: REJECTED — {body['error'].get('message')}"
+
+    data = body.get("data") or {}
+    expires = data.get("expires_at")
+    if expires in (0, None):
+        return "Token: valid, never expires (System User token)"
+    when = datetime.datetime.fromtimestamp(expires, datetime.UTC)
+    left = when - datetime.datetime.now(datetime.UTC)
+    hours = left.total_seconds() / 3600
+    if hours < 0:
+        return f"Token: EXPIRED at {when:%Y-%m-%d %H:%M UTC}"
+    return (
+        f"Token: TEMPORARY — expires {when:%Y-%m-%d %H:%M UTC} "
+        f"({hours:.1f}h left). Replace it with a System User token."
+    )
+
+
 def diagnose() -> int:
     """Is the WhatsApp Business Account subscribed to this app?
 
@@ -105,11 +136,13 @@ def main() -> int:
         print(f"\n{len(missing)} variable(s) missing; export them and re-run.")
         return 1
 
+    print(f"\n{_token_status()}")
+
     try:
         parts = store.digest_messages()
-        print(f"\nTurso: reachable, digest has {len(parts)} message(s)")
+        print(f"Turso: reachable, digest has {len(parts)} message(s)")
     except Exception as exc:
-        print(f"\nTurso: FAILED — {type(exc).__name__}: {exc}")
+        print(f"Turso: FAILED — {type(exc).__name__}: {exc}")
         return 1
 
     if len(sys.argv) < 2:
