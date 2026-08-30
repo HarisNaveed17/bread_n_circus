@@ -118,8 +118,10 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
 
 ## CI and deploys
 
-Added 2026-08-30, after the pipeline was proven end to end. Three moving
-parts, and the non-obvious one is the third.
+Added 2026-08-30, after the pipeline was proven end to end; **both paths ran
+green on 2026-08-30** — a preview deploy from a push to master, and a manual
+production deploy that health-checked the alias. Three moving parts, and the
+non-obvious one is the third.
 
 - **Commit format.** `<tag>: description`, tag one of
   `docs|tests|feat|fix|refactor`, under 72 chars, no full stop.
@@ -146,6 +148,15 @@ it off, Vercel builds nothing on push, and the CLI in Actions does the build
 (`vercel pull` → `vercel build` → `vercel deploy --prebuilt`). Corollary: the
 Vercel dashboard's "Deployments from Git" goes quiet; a missing preview after
 a push is a *workflow* failure, not a Vercel one.
+
+Getting the first run green cost an evening, on one trap worth naming here:
+**a Vercel token created with Team scope cannot drive the CLI at all.** It
+reads projects fine over REST, so it looks valid, but every CLI command
+preflights against `/v2/user`, which team-scoped tokens are blocked from —
+surfacing as `Could not retrieve Project Settings … remove the .vercel
+directory`, advice that is meaningless on a runner that has no such directory.
+The token must be **Full Account** scope. Both workflows now probe
+`/v2/user` before touching the CLI; `RUNBOOK.md` has the full symptom table.
 
 Two setup facts that only bite at runtime: the bot's env vars must be set for
 the **Preview** environment in Vercel too (otherwise the health check fails on
