@@ -8,7 +8,7 @@ API needs nothing but `httpx`.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -76,6 +76,31 @@ def digest_messages() -> list[str]:
         return []
     text, _ = found
     return [part for part in text.split(MESSAGE_SEPARATOR) if part.strip()]
+
+
+# -- day views ---------------------------------------------------------------
+#
+# `digest_events` is the week's digest broken into one row per event, written by
+# the pipeline (`isb_events/render.py` renders `block`; `isb_events/store.py`
+# stores it). Filtering is a WHERE clause here precisely so that no formatting
+# rule has to be duplicated on this side — the bot concatenates blocks and adds
+# a heading, nothing more.
+#
+# Deliberately keyed on `event_date` alone, not on a week: on a Saturday the
+# newest digest row is already *next* week, so joining through `digests` would
+# make "what's on today" come back empty from Saturday lunchtime onwards. The
+# day is unambiguous by itself — digest weeks do not overlap.
+DAY_EVENTS_SQL = """
+SELECT day_label, block FROM digest_events
+WHERE event_date = ?
+ORDER BY starts_at
+"""
+
+
+def day_events(day: date) -> list[tuple[str, str]]:
+    """`(day_label, block)` for everything on one day, in start order."""
+    rows = query(DAY_EVENTS_SQL, [day.isoformat()])
+    return [(row[0] or "", row[1] or "") for row in rows]
 
 
 # -- subscribers -------------------------------------------------------------

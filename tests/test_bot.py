@@ -7,15 +7,21 @@ directions (Turso read, Cloud API send), so nothing here touches the network.
 import hashlib
 import hmac
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
 
-from bot import app, store, whatsapp
+from bot import app, intent, store, whatsapp
 
 APP_SECRET = "test-app-secret"
 VERIFY_TOKEN = "test-verify-token"
 DIGEST = "*Islamabad — week of 31 Aug*\n\n• *Talk*\n🕒 7pm"
+
+
+def _week(*parts: str) -> list[str]:
+    """A full-week reply: the stored messages, with the day-filter hint on the last."""
+    return [*parts[:-1], f"{parts[-1]}\n\n{app.WEEK_HINT}"]
 
 
 @pytest.fixture(autouse=True)
@@ -209,14 +215,14 @@ def test_unsigned_event_is_rejected_without_sending(sent, stored_digest):
 def test_message_gets_the_stored_digest(sent, stored_digest):
     raw, sig = _signed(_message_payload())
     assert app.handle_event(raw, sig) == (200, "ok")
-    assert sent == [("923001234567", DIGEST)]
+    assert sent == [("923001234567", *_week(DIGEST))]
 
 
 def test_multi_part_digest_is_sent_as_separate_messages(sent, stored_digest):
     stored_digest(f"part one{store.MESSAGE_SEPARATOR}part two")
     raw, sig = _signed(_message_payload())
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == ["part one", "part two"]
+    assert [body for _, body in sent] == _week("part one", "part two")
 
 
 def test_any_text_gets_the_digest(sent, stored_digest):
@@ -299,7 +305,7 @@ def test_subscribe_opts_in_and_still_sends_the_digest(sent, stored_digest, write
     raw, sig = _signed(_message_payload(text="Subscribe"))
     app.handle_event(raw, sig)
     assert ("opt_in", "923001234567") in writes
-    assert [body for _, body in sent] == [app.OPT_IN_REPLY, DIGEST]
+    assert [body for _, body in sent] == [app.OPT_IN_REPLY, *_week(DIGEST)]
 
 
 def test_stop_opts_out_and_sends_no_digest(sent, stored_digest, writes):
@@ -314,7 +320,7 @@ def test_stop_matching_is_exact_not_substring(sent, stored_digest, writes):
     raw, sig = _signed(_message_payload(text="tell me about Stop Commenting on My Body"))
     app.handle_event(raw, sig)
     assert [name for name, _ in writes] == ["record_contact"]
-    assert [body for _, body in sent] == [DIGEST]
+    assert [body for _, body in sent] == _week(DIGEST)
 
 
 def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, monkeypatch):
@@ -324,7 +330,7 @@ def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, mon
     monkeypatch.setattr(store, "record_contact", boom)
     raw, sig = _signed(_message_payload())
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == [DIGEST]
+    assert [body for _, body in sent] == _week(DIGEST)
 
 
 def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
@@ -337,7 +343,7 @@ def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
     }
     raw, sig = _signed(payload)
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == [DIGEST]
+    assert [body for _, body in sent] == _week(DIGEST)
 
 
 # -- the send endpoint -------------------------------------------------------
@@ -446,7 +452,7 @@ def test_wsgi_post_reads_the_signature_header(sent, stored_digest, writes):
     status, body = _wsgi_call(method="POST", body=raw, headers={"HTTP_X_HUB_SIGNATURE_256": sig})
     assert status.startswith("200")
     assert body == "ok"
-    assert [b for _, b in sent] == [DIGEST]
+    assert [b for _, b in sent] == _week(DIGEST)
 
 
 def test_wsgi_post_without_a_signature_is_rejected(sent, stored_digest, writes):
@@ -613,3 +619,120 @@ def test_token_status_reports_rejection(monkeypatch):
         whatsapp, "graph_get", lambda p, q=None: {"error": {"message": "Session has expired"}}
     )
     assert "REJECTED" in selftest._token_status()
+
+
+# -- what did they ask for? --------------------------------------------------
+
+TODAY = date(2026, 9, 1)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["what's on today", "TODAY", "anything on today?", "what's on tonight"],
+)
+def test_today_is_recognised(text):
+    wanted = intent.parse(text, today=TODAY)
+    assert (wanted.kind, wanted.day, wanted.label) == (intent.DAY, TODAY, "today")
+
+
+@pytest.mark.parametrize("text", ["what's on tomorrow", "tomorrow?", "tmrw"])
+def test_tomorrow_is_recognised(text):
+    wanted = intent.parse(text, today=TODAY)
+    assert (wanted.kind, wanted.day, wanted.label) == (intent.DAY, date(2026, 9, 2), "tomorrow")
+
+
+@pytest.mark.parametrize("text", ["what's on this week", "hi", "", "events"])
+def test_everything_else_is_the_week(text):
+    assert intent.parse(text, today=TODAY) == intent.WEEK_FILTER
+
+
+def test_a_day_word_has_to_stand_alone():
+    """'Tomorrowland' is a plausible event title; it must not narrow the digest."""
+    assert intent.parse("tickets for Tomorrowland?", today=TODAY) == intent.WEEK_FILTER
+
+
+def test_tomorrow_wins_over_today_when_both_appear():
+    assert intent.parse("not today — tomorrow", today=TODAY).label == "tomorrow"
+
+
+# -- day replies -------------------------------------------------------------
+
+
+@pytest.fixture
+def day_rows(monkeypatch):
+    """Serve `digest_events` rows without touching Turso."""
+
+    def _set(rows):
+        monkeypatch.setattr(store, "day_events", lambda day: rows)
+
+    _set([("Tue 1 Sep", "• *Talk*\n🕒 7pm")])
+    return _set
+
+
+def test_asking_for_today_gets_only_that_day(sent, stored_digest, day_rows):
+    raw, sig = _signed(_message_payload(text="what's on today"))
+    app.handle_event(raw, sig)
+    assert sent == [("923001234567", "*Islamabad — Tue 1 Sep*\n\n• *Talk*\n🕒 7pm")]
+
+
+def test_the_day_heading_comes_from_the_stored_label(sent, stored_digest, day_rows):
+    """The bot never formats a date — the renderer's heading is stored and reused."""
+    day_rows([("Wed 2 Sep", "• *Gig*\n🕒 9pm")])
+    raw, sig = _signed(_message_payload(text="tomorrow"))
+    app.handle_event(raw, sig)
+    assert sent[0][1].startswith("*Islamabad — Wed 2 Sep*")
+
+
+def test_blocks_are_ordered_as_the_query_returned_them(sent, stored_digest, day_rows):
+    day_rows([("Tue 1 Sep", "• *Early*"), ("Tue 1 Sep", "• *Late*")])
+    raw, sig = _signed(_message_payload(text="today"))
+    app.handle_event(raw, sig)
+    assert sent[0][1] == "*Islamabad — Tue 1 Sep*\n\n• *Early*\n\n• *Late*"
+
+
+def test_an_empty_day_says_so_instead_of_sending_the_week(sent, stored_digest, day_rows):
+    day_rows([])
+    raw, sig = _signed(_message_payload(text="anything on tomorrow?"))
+    app.handle_event(raw, sig)
+    assert sent == [("923001234567", app.NOTHING_ON.format(when="tomorrow"))]
+
+
+def test_a_missing_digest_events_table_falls_back_to_the_week(sent, stored_digest, monkeypatch):
+    """Migrations run in the pipeline, so the bot can be newer than the schema."""
+
+    def boom(day):
+        raise RuntimeError("no such table: digest_events")
+
+    monkeypatch.setattr(store, "day_events", boom)
+    raw, sig = _signed(_message_payload(text="what's on today"))
+    assert app.handle_event(raw, sig) == (200, "ok")
+    bodies = [body for _, body in sent]
+    assert bodies[0] == app.DAY_UNAVAILABLE_NOTE
+    assert DIGEST in bodies[1]
+
+
+def test_a_day_reply_splits_over_the_char_limit(sent, stored_digest, day_rows):
+    day_rows([("Tue 1 Sep", "• *Gig*\n" + "x" * 2000) for _ in range(3)])
+    raw, sig = _signed(_message_payload(text="today"))
+    app.handle_event(raw, sig)
+    assert len(sent) > 1
+    assert all(len(body) <= app.WHATSAPP_LIMIT for _, body in sent)
+
+
+def test_the_week_reply_hints_at_the_day_filter(sent, stored_digest):
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert sent[0][1] == f"{DIGEST}\n\n{app.WEEK_HINT}"
+
+
+def test_the_hint_is_dropped_rather_than_overflowing_a_message(sent, stored_digest):
+    stored_digest("y" * (app.WHATSAPP_LIMIT - 2))
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert sent[0][1] == "y" * (app.WHATSAPP_LIMIT - 2)
+
+
+def test_day_queries_do_not_count_as_consent(sent, stored_digest, day_rows, writes):
+    raw, sig = _signed(_message_payload(text="what's on today"))
+    app.handle_event(raw, sig)
+    assert [name for name, _ in writes] == ["record_contact"]

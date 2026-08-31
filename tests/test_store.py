@@ -96,6 +96,47 @@ def test_save_digest_overwrites_and_clears_sent_at(store):
     assert row["sent_at"] is None
 
 
+def _entry(**overrides) -> dict:
+    fields = {
+        "id": "abc123",
+        "event_date": "2026-09-11",
+        "day_label": "Fri 11 Sep",
+        "starts_at": "2026-09-11T20:00:00+05:00",
+        "category": None,
+        "block": "• *Kaavish Live*\n🕒 8pm",
+    }
+    return {**fields, **overrides}
+
+
+def test_save_digest_events_round_trips(store):
+    store.save_digest_events(WEEK_OF, [_entry()])
+    row = store._conn.execute(
+        "SELECT week_of, event_date, day_label, block FROM digest_events"
+    ).fetchone()
+    assert tuple(row) == ("2026-08-31", "2026-09-11", "Fri 11 Sep", "• *Kaavish Live*\n🕒 8pm")
+
+
+def test_save_digest_events_replaces_the_week_wholesale(store):
+    """A re-render must not leave an event behind that the source has dropped."""
+    store.save_digest_events(WEEK_OF, [_entry(), _entry(id="gone", block="• *Cancelled*")])
+    store.save_digest_events(WEEK_OF, [_entry(block="• *Kaavish Live (moved)*")])
+    rows = store._conn.execute("SELECT id, block FROM digest_events").fetchall()
+    assert [tuple(r) for r in rows] == [("abc123", "• *Kaavish Live (moved)*")]
+
+
+def test_save_digest_events_leaves_other_weeks_alone(store):
+    store.save_digest_events(date(2026, 8, 24), [_entry(id="older")])
+    store.save_digest_events(WEEK_OF, [_entry()])
+    rows = store._conn.execute("SELECT id FROM digest_events ORDER BY week_of").fetchall()
+    assert [r[0] for r in rows] == ["older", "abc123"]
+
+
+def test_save_digest_events_accepts_an_empty_week(store):
+    store.save_digest_events(WEEK_OF, [_entry()])
+    store.save_digest_events(WEEK_OF, [])
+    assert store._conn.execute("SELECT COUNT(*) FROM digest_events").fetchone()[0] == 0
+
+
 def test_mark_digest_sent(store):
     store.save_digest(WEEK_OF, "text", [])
     store.mark_digest_sent(WEEK_OF)

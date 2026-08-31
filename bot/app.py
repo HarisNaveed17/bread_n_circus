@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date, datetime
 
-from . import store, whatsapp
+from . import intent, store, whatsapp
+from .store import KARACHI
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,16 @@ OPT_OUT_REPLY = (
     "Done — I won't message you first again. "
     "You can still message me any time to get the week's events."
 )
+# Appended to the last message of a full-week reply. Nobody discovers a filter
+# they were never told about, and the alternative — putting it in the stored
+# digest — would bake a bot affordance into text the pipeline also renders for
+# other purposes.
+WEEK_HINT = '_Ask for "today" or "tomorrow" for just that day._'
+NOTHING_ON = "Nothing listed for {when}. Reply *this week* for everything that's on."
+DAY_UNAVAILABLE_NOTE = "Here's the whole week instead."
+
+# Meta's cap on a text message body.
+WHATSAPP_LIMIT = 4096
 
 # Honouring a typed STOP is a Meta requirement, not a feature. Kept to exact
 # words rather than substring matching: "stop commenting on my body" is an
@@ -87,6 +99,15 @@ def handle_health(token: str | None) -> tuple[int, str]:
         lines.append(f"subscribers: MISSING — {exc}")
         lines.append("            run the pipeline against this database once")
         lines.append("            (`gh workflow run weekly-digest.yml`) to migrate")
+
+    # Same story for the day views: without this table "what's on today" quietly
+    # falls back to the whole week, which looks like a parsing bug from a phone.
+    try:
+        rows = store.query("SELECT COUNT(*) FROM digest_events")
+        lines.append(f"day views : table present — {rows[0][0]} event row(s)")
+    except Exception as exc:
+        lines.append(f"day views : MISSING — {exc}")
+        lines.append("            same fix: run the pipeline once to migrate")
 
     return 200, "\n".join(lines)
 
@@ -150,7 +171,65 @@ def _handle_message(message: dict) -> None:
         _send_digest(sender)
         return
 
-    _send_digest(sender)
+    _reply(sender, intent.parse(_body_text(message), today=_today()))
+
+
+def _today() -> date:
+    """The reader's today, not the runner's — Vercel functions run in UTC."""
+    return datetime.now(KARACHI).date()
+
+
+def _reply(to: str, wanted: intent.Filter) -> None:
+    if wanted.kind == intent.WEEK:
+        _send_digest(to)
+        return
+    _send_day(to, wanted)
+
+
+def _send_day(to: str, wanted: intent.Filter) -> None:
+    """One day's events, assembled from the blocks the pipeline already rendered."""
+    try:
+        rows = store.day_events(wanted.day)
+    except Exception:
+        # Most likely `digest_events` does not exist yet: migrations only run
+        # when the pipeline connects, and this deployment can be newer than the
+        # last cron run (CLAUDE.md § Working notes). Falling back to the week
+        # keeps the asker served; `?health=` is where the cause shows up.
+        log.exception("bot: day view unavailable for %s; falling back to the week", to)
+        whatsapp.send_text(to, DAY_UNAVAILABLE_NOTE)
+        _send_digest(to)
+        return
+
+    if not rows:
+        log.info("bot: nothing on %s for %s", wanted.day, to)
+        whatsapp.send_text(to, NOTHING_ON.format(when=wanted.label))
+        return
+
+    label = rows[0][0]
+    parts = _pack_day(label, [block for _, block in rows])
+    log.info("bot: sending %d event(s) for %s to %s", len(rows), wanted.day, to)
+    for part in parts:
+        whatsapp.send_text(to, part)
+
+
+def _pack_day(label: str, blocks: list[str]) -> list[str]:
+    """Header plus blocks, split at block boundaries under the char limit.
+
+    A single day overflowing 4096 would take a dozen events and is not expected;
+    this is here so that if it ever happens the reply truncates nowhere.
+    """
+    header = f"*Islamabad — {label}*"
+    messages: list[str] = []
+    current = header
+    for block in blocks:
+        candidate = f"{current}\n\n{block}"
+        if len(candidate) > WHATSAPP_LIMIT and current != header:
+            messages.append(current)
+            current = block
+        else:
+            current = candidate
+    messages.append(current)
+    return messages
 
 
 def _send_digest(to: str) -> None:
@@ -166,6 +245,9 @@ def _send_digest(to: str) -> None:
         log.warning("bot: no digest stored; replying with the placeholder to %s", to)
         whatsapp.send_text(to, NO_DIGEST_REPLY)
         return
+    hint = f"\n\n{WEEK_HINT}"
+    if len(parts[-1]) + len(hint) <= WHATSAPP_LIMIT:
+        parts[-1] += hint
     log.info("bot: sending digest (%d message(s)) to %s", len(parts), to)
     for part in parts:
         whatsapp.send_text(to, part)

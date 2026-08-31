@@ -91,11 +91,32 @@ run summary either way.
 
 ## WhatsApp bot (Phase 1)
 
-`bot/` answers any inbound WhatsApp message with the latest stored digest;
+`bot/` answers inbound WhatsApp messages from the latest stored digest;
 `api/webhook.py` is the Vercel entrypoint, a bare WSGI callable. It never imports `isb_events` — it
 reads Turso over the HTTP API with plain `httpx`, because the pipeline's libSQL
 driver is a compiled extension and a poor fit for a serverless runtime. The two
 sides share a database table, not a process.
+
+What it understands:
+
+| Message | Reply |
+|---------|-------|
+| `today`, `tonight` | Just today's events |
+| `tomorrow`, `tmrw` | Just tomorrow's |
+| anything else | The whole week (the default) |
+| `subscribe` / `start` / `join` | Opt in to the weekly nudge, then the digest |
+| `stop` / `unsubscribe` / `cancel` | Opt out |
+
+Day words are matched as whole words anywhere in the message, so "what's on
+tomorrow?" works and an event called "Tomorrowland" does not narrow the digest.
+The opt-in/opt-out words must be the *entire* message.
+
+Day replies are assembled from `digest_events`, a table the pipeline fills on
+every render with one row per event — the block text already rendered by
+`isb_events/render.py`, plus the day and category to filter on. The bot
+concatenates; it owns no formatting rules. **A day view therefore only works
+once the pipeline has rendered against that database**; until then the bot says
+so and falls back to the week, and `?health=` reports the table as missing.
 
 Environment (set these in the Vercel project, not in the repo):
 

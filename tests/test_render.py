@@ -6,11 +6,11 @@ character, so a `\-` prints as a backslash), no `[text](url)` link syntax
 marked line per field so the reader can scan time and address separately.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
 from isb_events.models import KARACHI, DigestWindow, Event
 from isb_events.normalize import normalize
-from isb_events.render import render
+from isb_events.render import MAX_EVENTS, SERIES_MARK, TIME_MARK, event_blocks, render
 
 WINDOW = DigestWindow.week_of(datetime(2026, 8, 24, tzinfo=KARACHI).date())
 
@@ -94,3 +94,48 @@ def test_recurring_series_collapsed_to_one_block():
 def test_out_of_window_events_dropped():
     msgs = render([_ev("NextWeek", 31)], WINDOW)  # 31 Aug is outside the window
     assert "No events found" in msgs[0]
+
+
+# -- event_blocks: the same render, per event, for the bot's day views --------
+
+
+def test_event_blocks_are_the_blocks_the_week_renders():
+    """The whole point of the seam: one formatter, two views."""
+    events = [_ev("Talk", 24, venue="F-7 Markaz", price_text="Free")]
+    entry = event_blocks(events, WINDOW)[0]
+    assert entry["block"] in "\n".join(render(events, WINDOW))
+
+
+def test_event_blocks_carry_the_fields_the_bot_filters_on():
+    entry = event_blocks([_ev("Talk", 25, hour=19, category="music")], WINDOW)[0]
+    assert entry["event_date"] == "2026-08-25"
+    assert entry["day_label"] == "Tue 25 Aug"
+    assert entry["category"] == "music"
+    assert entry["starts_at"].startswith("2026-08-25T19:00")
+
+
+def test_event_blocks_day_label_matches_the_weekly_day_heading():
+    """The bot heads a day reply with this string; it must be the same heading."""
+    events = [_ev("Talk", 25)]
+    assert f"*{event_blocks(events, WINDOW)[0]['day_label']}*" in "\n".join(render(events, WINDOW))
+
+
+def test_event_blocks_keep_a_series_expanded():
+    """Collapsing is a weekly-view choice — a single day wants that day's sitting."""
+    series = [_ev("Yoga Session: 1", 24), _ev("Yoga Session: 2", 26)]
+    entries = event_blocks(series, WINDOW)
+    assert len(entries) == 2
+    assert all(SERIES_MARK not in e["block"] for e in entries)
+    assert all(TIME_MARK in e["block"] for e in entries)
+
+
+def test_event_blocks_are_not_capped_at_max_events():
+    """MAX_EVENTS keeps one message readable; it must not empty out a day."""
+    events = [_ev(f"Gig {n}", 24, hour=9 + (n % 12)) for n in range(MAX_EVENTS + 5)]
+    assert len(event_blocks(events, WINDOW)) == MAX_EVENTS + 5
+
+
+def test_event_blocks_drop_out_of_window_events():
+    talk = _ev("Talk", 24)
+    assert len(event_blocks([talk], WINDOW)) == 1
+    assert event_blocks([talk], DigestWindow.week_of(date(2026, 9, 7))) == []

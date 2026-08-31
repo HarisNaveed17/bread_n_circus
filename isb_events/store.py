@@ -143,6 +143,33 @@ class Store:
         )
         self._conn.commit()
 
+    def save_digest_events(self, week_of: date, entries: list[dict]) -> None:
+        """Replace the week's per-event rows with `render.event_blocks` output.
+
+        Delete-then-insert rather than upsert: an event that vanished from the
+        source between two renders has to disappear from the day views too, and
+        an upsert would leave it sitting there forever.
+        """
+        self._conn.execute("DELETE FROM digest_events WHERE week_of = ?", (week_of.isoformat(),))
+        for entry in entries:
+            self._conn.execute(
+                """
+                INSERT INTO digest_events (
+                    week_of, id, event_date, day_label, starts_at, category, block
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    week_of.isoformat(),
+                    entry["id"],
+                    entry["event_date"],
+                    entry["day_label"],
+                    entry["starts_at"],
+                    entry["category"],
+                    entry["block"],
+                ),
+            )
+        self._conn.commit()
+
     def get_digest(self, week_of: date) -> dict | None:
         cur = self._conn.execute("SELECT * FROM digests WHERE week_of = ?", (week_of.isoformat(),))
         row = cur.fetchone()

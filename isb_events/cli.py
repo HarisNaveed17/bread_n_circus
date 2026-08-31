@@ -15,6 +15,7 @@ import typer
 from .models import DigestWindow
 from .notify.base import DryRunNotifier, Notifier
 from .pipeline import run_fetch
+from .render import event_blocks
 from .render import render as render_events
 from .store import Store
 
@@ -86,6 +87,9 @@ def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
         else:
             event_ids = [e.id for e in result.events]
             store.save_digest(_week_start(window), text, event_ids)
+            # The same render, per event, so the bot can serve "what's on today"
+            # without a second copy of the formatting rules. See render.event_blocks.
+            store.save_digest_events(_week_start(window), event_blocks(result.events, window))
             typer.echo(f"saved digest for week of {_week_start(window)}")
 
 
@@ -121,6 +125,7 @@ def run(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
         text = "\n\n===MESSAGE===\n\n".join(messages)
         if not dry_run:
             store.save_digest(week_start, text, [e.id for e in result.events])
+            store.save_digest_events(week_start, event_blocks(result.events, window))
         _notifier(dry_run).send(messages)
         if not dry_run:
             store.mark_digest_sent(week_start)

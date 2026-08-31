@@ -5,6 +5,10 @@ reserved seam for per-subscriber variants; it is unused in v0. Each returned
 string is one message, already under the 4096-char limit and split only at day
 boundaries.
 
+`event_blocks(events, window) -> list[dict]` is the same render broken into its
+parts, which is how the bot serves "what's on today" without owning a second
+copy of these formatting rules.
+
 WhatsApp is not Markdown. It takes `*bold*` and `_italic_` and nothing else:
 there is no link syntax (`[text](url)` shows up literally — bare URLs are
 auto-linked instead) and there is no escape character, so the MarkdownV2
@@ -46,6 +50,22 @@ def _fmt_time(dt: datetime) -> str:
 def _month_day(dt: datetime) -> str:
     dt = dt.astimezone(KARACHI)
     return f"{dt.day} {dt:%b}"
+
+
+def day_key(dt: datetime) -> str:
+    """The calendar day an event falls on, in Karachi. Grouped and filtered on."""
+    return dt.astimezone(KARACHI).strftime("%Y-%m-%d")
+
+
+def day_label(dt: datetime) -> str:
+    """ "Tue 1 Sep" — the day heading.
+
+    The month is in it because a Mon-Sun window straddles one often enough that
+    a bare "Tue 1" under "week of 31 Aug" misleads. Public because the bot heads
+    its single-day replies the same way, and stores this string rather than
+    reimplementing the format — see `event_blocks`.
+    """
+    return dt.astimezone(KARACHI).strftime("%a %-d %b")
 
 
 def _event_block(event: Event, dates: list[datetime] | None = None) -> str:
@@ -98,19 +118,15 @@ def render(
     # Group by calendar day, then collapse recurring series within the week.
     by_day: dict[str, list[Event]] = defaultdict(list)
     for e in in_window:
-        day_key = e.starts_at.astimezone(KARACHI).strftime("%Y-%m-%d")
-        by_day[day_key].append(e)
+        by_day[day_key(e.starts_at)].append(e)
 
     series_all = _collapse_series(in_window)
 
     day_blocks: list[str] = []
     rendered_series: set[str] = set()
-    for day_key in sorted(by_day):
-        day_events = by_day[day_key]
-        day_dt = day_events[0].starts_at.astimezone(KARACHI)
-        # The month is in the day heading because a Mon–Sun window straddles
-        # one often enough that a bare "Tue 1" under "week of 31 Aug" misleads.
-        blocks = [f"*{day_dt.strftime('%a %-d %b')}*"]
+    for key in sorted(by_day):
+        day_events = by_day[key]
+        blocks = [f"*{day_label(day_events[0].starts_at)}*"]
         for e in day_events:
             skey = e.series_key or f"__{e.id}"
             group = series_all[skey]
@@ -129,6 +145,40 @@ def render(
         return [f"{header}\n\n_No events found this week._"]
 
     return _pack(header, day_blocks, cut_note)
+
+
+def event_blocks(events: list[Event], window: DigestWindow) -> list[dict]:
+    """The same render, one entry per event, for the bot's filtered views.
+
+    `render` returns a week as text; this returns its parts, each block paired
+    with the fields worth filtering on. The pipeline stores these in
+    `digest_events` so the bot can answer "what's on today" with a WHERE clause
+    and a join, never a second copy of the formatting rules above.
+
+    Two deliberate differences from `render`:
+
+    - **Series stay expanded.** The weekly text collapses a recurring series to
+      one "3× this week" line; someone asking about a single day wants that
+      day's sitting and the time it starts.
+    - **`MAX_EVENTS` is not applied.** That cap keeps one message readable, and
+      a single day is nowhere near it — truncating the week would silently drop
+      events from days that were never crowded.
+    """
+    in_window = sorted(
+        (e for e in events if window.contains(e.starts_at)),
+        key=lambda e: e.starts_at,
+    )
+    return [
+        {
+            "id": e.id,
+            "event_date": day_key(e.starts_at),
+            "day_label": day_label(e.starts_at),
+            "starts_at": e.starts_at.isoformat(),
+            "category": e.category,
+            "block": _event_block(e),
+        }
+        for e in in_window
+    ]
 
 
 def _pack(header: str, day_blocks: list[str], cut_note: str) -> list[str]:
