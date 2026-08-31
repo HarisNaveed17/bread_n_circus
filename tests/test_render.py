@@ -46,7 +46,9 @@ def test_nothing_is_escaped():
     title = "Mir: The Parallel Universes - a talk (part 1.5)!"
     text = "\n".join(render([_ev(title, 24, venue="G-11/3, Islamabad")], WINDOW))
     assert title in text
-    assert "G-11/3, Islamabad" in text
+    # `normalize` drops the ", Islamabad" suffix; the sector must still arrive
+    # with its hyphen and slash unescaped, which is what this test is about.
+    assert "G-11/3" in text
     assert "\\" not in text
 
 
@@ -67,7 +69,7 @@ def test_time_venue_and_price_each_get_their_own_marked_line():
     )
     assert "• *Talk*" in text
     assert "🕒 6pm" in text
-    assert "📍 PNCA, Islamabad" in text
+    assert "📍 PNCA" in text
     assert "🎟 Free" in text
 
 
