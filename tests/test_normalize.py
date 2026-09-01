@@ -1,4 +1,4 @@
-"""Title and venue cleanup.
+"""Title/venue cleanup and duplicate merging.
 
 Every string asserted here was scraped from a real listing — the cases come
 from the digest for the week of 2026-08-31, not from imagination. When a rule
@@ -11,8 +11,15 @@ from datetime import datetime
 
 import pytest
 
+from isb_events import normalize as normalize_module
 from isb_events.models import KARACHI, Event
-from isb_events.normalize import clean_title, clean_venue, normalize, strip_series_marker
+from isb_events.normalize import (
+    clean_title,
+    clean_venue,
+    dedupe,
+    normalize,
+    strip_series_marker,
+)
 
 
 def _event(**kwargs) -> Event:
@@ -131,3 +138,108 @@ def test_normalize_leaves_a_clean_event_alone() -> None:
     event = _event(title="Bol ke Lab Azad Hain Tere", venue="PNCA")
     assert normalize(event).title == event.title
     assert normalize(event).venue == event.venue
+
+
+# -- dedupe (M3) -------------------------------------------------------------
+#
+# The asymmetry that shapes every rule here: a missed duplicate is a scruffy
+# digest, a wrong merge silently deletes an event. These pin the "must not
+# merge" side hardest.
+
+
+def _at(day, hour=20, minute=0, title="Kaavish Live", url=None, **kw):
+    return Event(
+        title=title,
+        starts_at=datetime(2026, 9, day, hour, minute, tzinfo=KARACHI),
+        url=url or f"https://ticketwala.pk/event/{day}-{hour}-{minute}",
+        sources=kw.pop("sources", ["ticketwala"]),
+        **kw,
+    )
+
+
+def test_dedupe_merges_a_relisting_under_a_new_slug():
+    """The duplicate frequent scraping actually produces: same show, new URL."""
+    merged = dedupe(
+        [
+            _at(11, title="Kaavish Live (Jinnah Convention Centre, Islamabad)", url="a"),
+            _at(
+                11,
+                title="Kaavish Live - Jinnah Convention Centre",
+                url="b",
+                price_text="Rs 3,000",
+            ),
+        ]
+    )
+    assert len(merged) == 1
+    # The survivor keeps its own id/url, and gains what only the other had.
+    assert merged[0].url == "a"
+    assert merged[0].price_text == "Rs 3,000"
+
+
+def test_dedupe_keeps_consecutive_nights_apart():
+    """Ticketwala really listed Kaavish on 11 and 12 Sep 2026. Both are real.
+
+    Verified live: two slugs, two dates, both `status: publish`. Merging them
+    would delete a concert, which is why nothing in dedupe looks past a day.
+    """
+    nights = [
+        _at(11, title="Kaavish Live (Jinnah Convention Centre, Islamabad)", url="a"),
+        _at(12, title="Kaavish Live - Islamabad - 12th September", url="b"),
+    ]
+    assert len(dedupe(nights)) == 2
+
+
+def test_dedupe_keeps_two_sittings_on_one_day_apart():
+    """A morning and an evening session of one series are two events."""
+    same_day = [_at(11, hour=8, title="Yoga Session: 1"), _at(11, hour=18, title="Yoga Session: 2")]
+    assert len(dedupe(same_day)) == 2
+
+
+def test_dedupe_keeps_different_events_at_one_venue():
+    both = [
+        _at(11, title="Bollywood Night", venue="PNCA", url="a"),
+        _at(11, title="5th International Jazz Festival", venue="PNCA", url="b"),
+    ]
+    assert len(dedupe(both)) == 2
+
+
+def test_dedupe_will_not_merge_across_a_venue_disagreement():
+    apart = [
+        _at(11, title="Open Mic Night", venue="The Black Hole, G-11/3", url="a"),
+        _at(11, title="Open Mic Night", venue="Cafe Sol, Bahria Phase 4", url="b"),
+    ]
+    assert len(dedupe(apart)) == 2
+
+
+def test_dedupe_merges_across_sources_and_unions_them():
+    """The M7 case: one event listed by an organiser and a ticket seller."""
+    merged = dedupe(
+        [
+            _at(11, hour=19, title="Open Mic Night", sources=["blackhole"], url="a"),
+            _at(11, hour=19, minute=30, title="Open Mic Night!", sources=["ticketwala"], url="b"),
+        ]
+    )
+    assert len(merged) == 1
+    assert merged[0].sources == ["blackhole", "ticketwala"]
+    # starts_at is the earliest time an attendee is expected, not the headline.
+    assert merged[0].starts_at.hour == 19 and merged[0].starts_at.minute == 0
+
+
+def test_dedupe_needs_the_fuzz_processor_to_fire_at_all():
+    """Punctuation must not defeat the threshold — the bug this rule had first.
+
+    Without `default_process` these two score 74 rather than 100, because
+    "(Jinnah" and "Jinnah" are different tokens, and nothing ever merges.
+    """
+    assert (
+        normalize_module._ratio(
+            "Kaavish Live (Jinnah Convention Centre, Islamabad)",
+            "Kaavish Live - Jinnah Convention Centre",
+        )
+        == 100
+    )
+
+
+def test_dedupe_is_a_no_op_on_distinct_events():
+    week = [_at(d, title=f"Gig {d}") for d in range(11, 16)]
+    assert len(dedupe(week)) == 5
