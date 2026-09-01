@@ -21,11 +21,15 @@ uv run isb-events run --dry-run --week-of 2026-08-24
 | Command  | Does                                              |
 |----------|---------------------------------------------------|
 | `fetch`  | Scrape enabled sources into the store             |
-| `render` | Render stored events into the `digests` row       |
+| `render` | Render stored events into the `digests` row (this week + next) |
 | `send`   | Print the stored digest (`--dry-run`); no push channel yet |
 | `run`    | `fetch` → `render` → `send` in one shot           |
 
-All take `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming Mon–Sun).
+All take `--dry-run` and `--week-of YYYY-MM-DD`. With no `--week-of`, `render`
+covers **two** weeks — the one today falls in and the one after it — so that the
+bot's "what's on today" stays fresh between runs; `fetch`, `send` and `run` use
+the coming Mon–Sun as before. An explicit `--week-of` always means that week
+alone.
 
 ## Configuration
 
@@ -79,9 +83,16 @@ Then dispatch the workflow by hand (below) before trusting the schedule.
 
 ## Automation
 
-`.github/workflows/weekly-digest.yml` runs `render` every Saturday at 10:00
-Karachi (05:00 UTC), scraping the enabled sources and saving the digest into
-the store. It sends nothing — that lands with the WhatsApp work.
+`.github/workflows/weekly-digest.yml` runs `render` **twice a day, at ~11:17
+and ~19:17 Karachi** (06:17 and 14:17 UTC), scraping the enabled sources and
+saving the digest into the store. It sends nothing — that lands with the
+WhatsApp work.
+
+Each run refreshes the current week and the coming one, so today's and
+tomorrow's listings are never more than a few hours stale. GitHub's scheduler
+is best-effort and drops firings; running twice a day means a missed one costs
+hours rather than a week. Re-running is safe — events upsert by id, and
+`dedupe` merges a listing that was re-published under a new URL.
 
 Needs two repo secrets: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. The job
 fails fast without them rather than silently writing to a throwaway sqlite
@@ -91,7 +102,8 @@ run summary either way.
 
 ## WhatsApp bot (Phase 1)
 
-`bot/` answers inbound WhatsApp messages from the latest stored digest;
+`bot/` answers inbound WhatsApp messages from the stored digest for the week
+containing today;
 `api/webhook.py` is the Vercel entrypoint, a bare WSGI callable. It never imports `isb_events` — it
 reads Turso over the HTTP API with plain `httpx`, because the pipeline's libSQL
 driver is a compiled extension and a poor fit for a serverless runtime. The two

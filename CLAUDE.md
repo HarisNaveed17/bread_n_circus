@@ -47,7 +47,8 @@ datetimes are timezone-aware in `Asia/Karachi`.
   to be Disclosed…" venue to "TBA". Every rule was written against a string a
   live source actually produced; `tests/test_normalize.py` names them.
   `series_key` derives from the *cleaned* title, so a caps-typed session still
-  groups with its siblings. `dedupe()` is a pass-through until M3.
+  groups with its siblings. `dedupe()` merges listings that are the same event
+  (M3) — see [Dedup](#dedup-m3).
 - `render.py` — pure function, `Event`s → WhatsApp message list. No escaping
   and no `[text](url)`: WhatsApp is not Markdown. See [Delivery](#delivery).
   `event_blocks()` is the same render broken into one dict per event (block
@@ -101,8 +102,10 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   exists anywhere in the API (checked list and detail responses), so
   `price_text` is always `None` for Ticketwala events — unlike Black Hole,
   there's no safe "assume free" default since Ticketwala sells paid tickets.
-- **M3 — not started**: real fuzzy dedup/merge. `rapidfuzz` is already a
-  dependency, unused until this lands.
+- **M3 — done** (2026-09-02): fuzzy dedup/merge in `normalize.dedupe()`,
+  using `rapidfuzz`. Built when the cron went twice-daily, because re-scraping
+  the same week repeatedly is what makes a re-published listing land twice.
+  See [Dedup](#dedup-m3) for the rule and why it is as strict as it is.
 - **M4–M6 — not yet described anywhere in the repo.**
 - **M7 — gate LIFTED 2026-08-30.** The condition was a digest going
   scrape → store → WhatsApp for real; it has now done so. Original entry
@@ -120,8 +123,23 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   its own top-level key, separate from `sources` — it wants **one** scraper
   iterating the list, not one module per organiser. The variable part is data.
 - **GitHub Actions cron — done** (`.github/workflows/weekly-digest.yml`):
-  runs `render` Saturdays 10:00 Karachi (05:00 UTC), scraping and saving the
-  digest into the store. **Sends nothing on purpose** — delivery is
+  runs `render` **twice daily, ~11:17 and ~19:17 Karachi** (06:17 and 14:17
+  UTC), scraping and saving the digest into the store. Was Saturdays only
+  until 2026-09-02; the move to twice-daily is what makes "what's on today"
+  worth asking, and it is what motivated M3 dedup.
+  **A bare `render` now covers two weeks, the current one and the coming
+  one** — see `cli._windows`. This is load-bearing, not tidiness:
+  `DigestWindow.coming_week()` is *next* week from Tuesday onwards, so a daily
+  cron rendering only that would refresh a week nobody is in yet and leave
+  today's and tomorrow's listings frozen until Monday. `current_week()` was
+  added for exactly this.
+  Two consequences to keep in mind. The bot no longer serves "the newest
+  digest row" — with next week's row written days ahead, that would answer
+  "what's on" with a week that has not started; `bot/store.current_digest()`
+  picks the week containing today instead. And `save_digest` resets `sent_at`
+  to NULL on every upsert, so it is now cleared twice a day — **Phase 2's
+  nudge must not use `sent_at` as its "already nudged" flag**, or it will
+  re-nudge every run. **Sends nothing on purpose** — delivery is
   mid-migration, and the WhatsApp bot reads the digest straight out of Turso,
   so populating that row is the whole job and delivery stays additive. Guards
   on `TURSO_DATABASE_URL` being set, because without it the store silently
@@ -178,6 +196,38 @@ the **Preview** environment in Vercel too (otherwise the health check fails on
 left on for previews, the smoke test needs
 `VERCEL_AUTOMATION_BYPASS_SECRET` as a repo secret. curl can send the bypass
 header; Meta cannot, which is why production protection stays off.
+
+## Dedup (M3)
+
+Built 2026-09-02. `normalize.dedupe()` merges two records only when **all** of
+these hold: same calendar day in Karachi, start times within an hour, titles
+scoring ≥88 on `rapidfuzz.token_set_ratio`, and — when both sides have one —
+venues scoring ≥88 too. The survivor keeps its own `id` and `url` (so ids stay
+stable), gains any field the other had and it lacked, takes the union of
+`sources`, and takes the *earlier* `starts_at`.
+
+**The asymmetry is the whole design.** A missed duplicate is a scruffy digest;
+a wrong merge silently deletes an event nobody can get back. So every rule
+errs toward not merging.
+
+Three things worth knowing before loosening any of it:
+
+- **Nothing looks past a single day, and that is deliberate.** Ticketwala
+  listed *Kaavish Live* on 11 and 12 September 2026 under two slugs, two
+  titles ("Kaavish Live (Jinnah Convention Centre, Islamabad)" and "Kaavish
+  Live - Islamabad - 12th September") and one venue. Both were live and
+  `status: publish` when checked against the API on 2026-09-02 — **two real
+  concerts.** Any rule that merges across days deletes one of them.
+  `tests/test_normalize.py` pins this pair.
+- **`fuzz.token_set_ratio` needs `processor=utils.default_process`.** Without
+  it that pair's *same-night* variant scores 74 rather than 100, because
+  "(Jinnah" and "Jinnah" are different tokens — so the threshold never fires
+  and dedup silently does nothing. This was the rule's first bug.
+- **Run it against the live store before changing a threshold.** At the time
+  of writing the 27 stored events contain *zero* true duplicates, so `dedupe`
+  is a no-op on real data; its job is the duplicate that frequent scraping
+  creates, a listing re-published under a new slug. A threshold change that
+  starts merging real events will not show up in the unit tests.
 
 ## Delivery
 
