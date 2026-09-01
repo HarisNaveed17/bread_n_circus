@@ -7,7 +7,7 @@ directions (Turso read, Cloud API send), so nothing here touches the network.
 import hashlib
 import hmac
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -82,7 +82,7 @@ def stored_digest(monkeypatch):
     """
 
     def _set(text):
-        monkeypatch.setattr(store, "latest_digest", lambda: (text, "2026-08-31"))
+        monkeypatch.setattr(store, "current_digest", lambda: (text, "2026-08-31"))
 
     monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
     _set(DIGEST)
@@ -151,13 +151,13 @@ def test_query_raises_on_a_turso_error(monkeypatch):
 
 def test_digest_messages_splits_on_the_pipeline_separator(monkeypatch):
     monkeypatch.setattr(
-        store, "latest_digest", lambda: (f"one{store.MESSAGE_SEPARATOR}two", "2026-08-31")
+        store, "current_digest", lambda: (f"one{store.MESSAGE_SEPARATOR}two", "2026-08-31")
     )
     assert store.digest_messages() == ["one", "two"]
 
 
 def test_digest_messages_is_empty_when_nothing_is_stored(monkeypatch):
-    monkeypatch.setattr(store, "latest_digest", lambda: None)
+    monkeypatch.setattr(store, "current_digest", lambda: None)
     assert store.digest_messages() == []
 
 
@@ -252,7 +252,7 @@ def test_status_callbacks_are_ignored(sent, stored_digest):
 
 
 def test_missing_digest_replies_with_an_explanation(sent, monkeypatch):
-    monkeypatch.setattr(store, "latest_digest", lambda: None)
+    monkeypatch.setattr(store, "current_digest", lambda: None)
     raw, sig = _signed(_message_payload())
     app.handle_event(raw, sig)
     assert sent == [("923001234567", app.NO_DIGEST_REPLY)]
@@ -483,13 +483,13 @@ def test_health_reports_a_reachable_digest(stored_digest):
 
 
 def test_health_distinguishes_an_empty_store_from_a_broken_one(monkeypatch):
-    monkeypatch.setattr(store, "latest_digest", lambda: None)
+    monkeypatch.setattr(store, "current_digest", lambda: None)
     assert "NO ROWS" in app.handle_health(VERIFY_TOKEN)[1]
 
     def boom():
         raise RuntimeError("401 Unauthorized")
 
-    monkeypatch.setattr(store, "latest_digest", boom)
+    monkeypatch.setattr(store, "current_digest", boom)
     body = app.handle_health(VERIFY_TOKEN)[1]
     assert "UNREACHABLE" in body and "401 Unauthorized" in body
 
@@ -736,3 +736,71 @@ def test_day_queries_do_not_count_as_consent(sent, stored_digest, day_rows, writ
     raw, sig = _signed(_message_payload(text="what's on today"))
     app.handle_event(raw, sig)
     assert [name for name, _ in writes] == ["record_contact"]
+
+
+# -- which week does "what's on" serve? --------------------------------------
+#
+# Newest-row-wins was right only while the cron ran once a week. A daily cron
+# writes next week's row days ahead, so the bot has to pick by date instead.
+
+
+@pytest.fixture
+def digest_rows(monkeypatch):
+    """Answer the three week lookups out of a fake `digests` table."""
+
+    def _set(rows: dict[str, str], today: date):
+        monkeypatch.setattr(store, "datetime", _FrozenDatetime(today))
+
+        def fake_query(sql, args=None):
+            monday = args[0]
+            if sql == store.WEEK_DIGEST_SQL:
+                hit = [monday] if monday in rows else []
+            elif sql == store.UPCOMING_DIGEST_SQL:
+                hit = sorted(w for w in rows if w > monday)[:1]
+            else:
+                hit = sorted((w for w in rows if w < monday), reverse=True)[:1]
+            return [[rows[w], w] for w in hit]
+
+        monkeypatch.setattr(store, "query", fake_query)
+
+    return _set
+
+
+class _FrozenDatetime:
+    def __init__(self, today):
+        self._today = today
+
+    def now(self, tz=None):
+        return datetime(self._today.year, self._today.month, self._today.day, 12, 0, tzinfo=tz)
+
+
+def test_the_week_containing_today_wins_over_a_newer_row(digest_rows):
+    """Wednesday: next week's row already exists, and must not be served."""
+    digest_rows({"2026-08-31": "this week", "2026-09-07": "next week"}, today=date(2026, 9, 2))
+    assert store.current_digest() == ("this week", "2026-08-31")
+
+
+def test_sunday_still_gets_the_week_it_is_in(digest_rows):
+    digest_rows({"2026-08-31": "this week", "2026-09-07": "next week"}, today=date(2026, 9, 6))
+    assert store.current_digest() == ("this week", "2026-08-31")
+
+
+def test_the_new_week_takes_over_on_monday(digest_rows):
+    digest_rows({"2026-08-31": "this week", "2026-09-07": "next week"}, today=date(2026, 9, 7))
+    assert store.current_digest() == ("next week", "2026-09-07")
+
+
+def test_falls_forward_when_this_week_was_never_rendered(digest_rows):
+    digest_rows({"2026-09-07": "next week"}, today=date(2026, 9, 2))
+    assert store.current_digest() == ("next week", "2026-09-07")
+
+
+def test_falls_back_to_a_past_week_rather_than_the_placeholder(digest_rows):
+    """Stale beats "no digest published yet" when a digest does exist."""
+    digest_rows({"2026-08-24": "old week"}, today=date(2026, 9, 2))
+    assert store.current_digest() == ("old week", "2026-08-24")
+
+
+def test_no_rows_at_all_is_still_none(digest_rows):
+    digest_rows({}, today=date(2026, 9, 2))
+    assert store.current_digest() is None

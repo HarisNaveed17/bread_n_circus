@@ -56,3 +56,39 @@ def test_coming_week_is_a_future_monday():
     now = datetime(2026, 8, 19, 12, 0, tzinfo=KARACHI)
     w = DigestWindow.coming_week(now=now)
     assert w.start == datetime(2026, 8, 24, 0, 0, tzinfo=KARACHI)
+
+
+# -- current_week vs coming_week ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "day,expected_current,expected_coming",
+    [
+        (date(2026, 8, 31), date(2026, 8, 31), date(2026, 8, 31)),  # Monday
+        (date(2026, 9, 1), date(2026, 8, 31), date(2026, 9, 7)),  # Tuesday
+        (date(2026, 9, 5), date(2026, 8, 31), date(2026, 9, 7)),  # Saturday
+        (date(2026, 9, 6), date(2026, 8, 31), date(2026, 9, 7)),  # Sunday
+        (date(2026, 9, 7), date(2026, 9, 7), date(2026, 9, 7)),  # next Monday
+    ],
+)
+def test_current_week_is_the_week_today_falls_in(day, expected_current, expected_coming):
+    """The distinction a daily cron depends on.
+
+    `coming_week` is *next* week from Tuesday onwards, so a cron that renders
+    only that leaves today's and tomorrow's listings — what the bot's day views
+    read — frozen until the next Monday.
+    """
+    now = datetime(day.year, day.month, day.day, 11, 0, tzinfo=KARACHI)
+    assert DigestWindow.current_week(now=now).start.date() == expected_current
+    assert DigestWindow.coming_week(now=now).start.date() == expected_coming
+
+
+def test_current_week_contains_today():
+    now = datetime(2026, 9, 2, 23, 59, tzinfo=KARACHI)
+    assert DigestWindow.current_week(now=now).contains(now)
+
+
+def test_current_week_is_tz_aware_in_karachi():
+    """A UTC `now` late in the day is already tomorrow in Karachi."""
+    now = datetime(2026, 9, 6, 20, 0, tzinfo=UTC)  # Sun 20:00 UTC = Mon 01:00 PKT
+    assert DigestWindow.current_week(now=now).start.date() == date(2026, 9, 7)

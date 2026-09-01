@@ -56,6 +56,18 @@ class DigestWindow(BaseModel):
         monday = today + timedelta(days=days_ahead)
         return cls.week_of(monday)
 
+    @classmethod
+    def current_week(cls, *, now: datetime | None = None) -> DigestWindow:
+        """The Mon-Sun window `now` falls inside — the week people are living in.
+
+        Distinct from `coming_week`, which from Tuesday onwards points at the
+        *next* week. Rendering only that leaves today and tomorrow frozen at
+        whatever the last Monday's run found, which is exactly what the bot's
+        day views read. A cron that runs more than once a week wants this one.
+        """
+        now = now.astimezone(KARACHI) if now else datetime.now(KARACHI)
+        return cls.week_of(now.date() - timedelta(days=now.weekday()))
+
     def contains(self, when: datetime) -> bool:
         return self.start <= when.astimezone(KARACHI) < self.end
 

@@ -9,20 +9,22 @@ name: Weekly digest
 
 on:
   schedule:
-    # Saturday ~10:17 Asia/Karachi. GitHub cron is always UTC (UTC+5 → 05:17);
-    # neither GitHub nor Pakistan observes DST, so this doesn't drift.
+    # Twice daily, ~11:17 and ~19:17 Asia/Karachi. GitHub cron is always UTC
+    # (UTC+5 → 06:17 and 14:17); neither GitHub nor Pakistan observes DST, so
+    # this doesn't drift.
     #
     # Deliberately not on the hour. GitHub's scheduler is best-effort and
     # queues everyone's cron at once at :00, so top-of-hour jobs are the most
     # delayed and the most often dropped outright — the 2026-08-29 05:00 run
-    # never happened. An odd minute sits in a quieter slot. This is still a
-    # best-effort trigger, not a guarantee: treat a missed week as expected
-    # behaviour and re-run by hand, rather than as a broken workflow.
-    - cron: "17 5 * * 6"
+    # never happened. An odd minute sits in a quieter slot. Still best-effort,
+    # not a guarantee; twice a day just means a dropped firing costs hours
+    # instead of a week.
+    - cron: "17 6 * * *"
+    - cron: "17 14 * * *"
   workflow_dispatch:
     inputs:
       week_of:
-        description: "Monday of the target week (YYYY-MM-DD). Blank = the coming week."
+        description: "Monday of the target week (YYYY-MM-DD). Blank = this week and the next."
         required: false
         type: string
 
@@ -67,6 +69,10 @@ jobs:
           fi
 
       - name: Scrape and save the digest
+        # A bare `render` refreshes the current week *and* the coming one. That
+        # matters now the cron runs daily: `coming_week` is next week from
+        # Tuesday on, so rendering only that would leave today's and tomorrow's
+        # listings — what the bot's day views read — frozen until Monday.
         run: |
           if [ -n "$WEEK_OF" ]; then
             uv run isb-events render --week-of "$WEEK_OF"
@@ -91,39 +97,51 @@ jobs:
           from isb_events.models import DigestWindow
           from isb_events.store import Store
 
+          # The same weeks `render` just wrote: an explicit one, or the current
+          # week and the coming one. Reporting only `coming_week` would leave
+          # the run summary silent about the week today actually falls in.
           week_of = os.environ.get("WEEK_OF") or ""
-          window = (
-              DigestWindow.week_of(date.fromisoformat(week_of))
-              if week_of
-              else DigestWindow.coming_week()
-          )
-          week_start = window.start.date()
+          if week_of:
+              windows = [DigestWindow.week_of(date.fromisoformat(week_of))]
+          else:
+              current, coming = DigestWindow.current_week(), DigestWindow.coming_week()
+              windows = [current] if current == coming else [current, coming]
 
           # Scheme only — never the host or the token.
           url = os.environ.get("TURSO_DATABASE_URL") or ""
           backend = url.split("://")[0] + "://" if "://" in url else "local sqlite file"
           with Store.open() as store:
-              row = store.get_digest(week_start)
+              rows = {w.start.date(): store.get_digest(w.start.date()) for w in windows}
               weeks = [r[0] for r in store._conn.execute(
                   "SELECT week_of FROM digests ORDER BY week_of DESC LIMIT 5"
               ).fetchall()]
+              day_rows = store._conn.execute(
+                  "SELECT event_date, COUNT(*) FROM digest_events GROUP BY event_date"
+                  " ORDER BY event_date"
+              ).fetchall()
 
-          print(f"### Digest for week of {week_start}")
-          print()
           print(f"- store: {backend}")
           print(f"- weeks present in `digests`: {weeks or 'none'}")
+          # The day views are what "what's on today" reads; a render that wrote
+          # a digest but no per-day rows is the failure worth seeing here.
+          print(f"- day views: {', '.join(f'{d} ({n})' for d, n in day_rows) or 'none'}")
           print()
 
-          if row is None:
+          missing = [str(w) for w, row in rows.items() if row is None]
+          if missing:
               # The render step reported success, so an empty read here means
               # the two steps did not agree on a database or on a week.
-              print(f"**No digest row for {week_start}.**")
+              print(f"**No digest row for {', '.join(missing)}.**")
               raise SystemExit(1)
 
-          text = row["rendered_text"]
-          print(f"- {len(text)} chars, {text.count(chr(10) * 2) + 1} blocks")
-          print()
-          print("```")
-          print(text)
-          print("```")
+          for week_start, row in rows.items():
+              text = row["rendered_text"]
+              print(f"### Digest for week of {week_start}")
+              print()
+              print(f"- {len(text)} chars, {text.count(chr(10) * 2) + 1} blocks")
+              print()
+              print("```")
+              print(text)
+              print("```")
+              print()
           PY

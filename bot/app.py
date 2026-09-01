@@ -78,7 +78,7 @@ def handle_health(token: str | None) -> tuple[int, str]:
         f"app secret: {'set' if os.environ.get('WHATSAPP_APP_SECRET') else 'MISSING'}",
     ]
     try:
-        found = store.latest_digest()
+        found = store.current_digest()
     except Exception as exc:
         lines.append(f"digest    : UNREACHABLE — {type(exc).__name__}: {exc}")
         return 200, "\n".join(lines)

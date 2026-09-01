@@ -8,7 +8,7 @@ API needs nothing but `httpx`.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -23,11 +23,24 @@ TIMEOUT = 10.0
 # `tests/test_bot.py` pins the two copies together.
 MESSAGE_SEPARATOR = "\n\n===MESSAGE===\n\n"
 
-# The newest digest is always the right one to serve: the cron only ever
-# renders forward. Mon-Fri the newest row is the current week; from Saturday
-# 10:00, when the cron has run, it is the week about to start — which is what
-# someone asking "what's on" on a Saturday means.
-LATEST_DIGEST_SQL = "SELECT rendered_text, week_of FROM digests ORDER BY week_of DESC LIMIT 1"
+# Serve the week the asker is actually living in.
+#
+# This used to be "newest row wins", which was right only while the cron ran
+# once a week: the next week's row did not exist until Saturday. A cron that
+# runs daily writes it days ahead, so newest-wins would answer "what's on" with
+# a week that has not started yet, every day from Tuesday on.
+#
+# So: the week containing today, by exact Monday. Failing that the nearest
+# upcoming one (nothing has been rendered for this week yet), and failing that
+# the most recent past one — stale, but better than the "no digest" placeholder
+# when a digest does exist.
+WEEK_DIGEST_SQL = "SELECT rendered_text, week_of FROM digests WHERE week_of = ? LIMIT 1"
+UPCOMING_DIGEST_SQL = (
+    "SELECT rendered_text, week_of FROM digests WHERE week_of > ? ORDER BY week_of ASC LIMIT 1"
+)
+PAST_DIGEST_SQL = (
+    "SELECT rendered_text, week_of FROM digests WHERE week_of < ? ORDER BY week_of DESC LIMIT 1"
+)
 
 
 def _http_url(database_url: str) -> str:
@@ -61,17 +74,24 @@ def query(sql: str, args: list[str] | None = None) -> list[list[str | None]]:
     return [[_cell(c) for c in row] for row in first["response"]["result"]["rows"]]
 
 
-def latest_digest() -> tuple[str, str] | None:
-    """`(rendered_text, week_of)` for the newest digest, or None if there is none."""
-    rows = query(LATEST_DIGEST_SQL)
-    if not rows or rows[0][0] is None:
-        return None
-    return rows[0][0], rows[0][1] or ""
+def current_digest() -> tuple[str, str] | None:
+    """`(rendered_text, week_of)` for the week containing today, or None."""
+    today = datetime.now(KARACHI).date()
+    monday = (today - timedelta(days=today.weekday())).isoformat()
+    for sql, args in (
+        (WEEK_DIGEST_SQL, [monday]),
+        (UPCOMING_DIGEST_SQL, [monday]),
+        (PAST_DIGEST_SQL, [monday]),
+    ):
+        rows = query(sql, args)
+        if rows and rows[0][0] is not None:
+            return rows[0][0], rows[0][1] or ""
+    return None
 
 
 def digest_messages() -> list[str]:
     """The digest split back into the messages the renderer packed it into."""
-    found = latest_digest()
+    found = current_digest()
     if found is None:
         return []
     text, _ = found

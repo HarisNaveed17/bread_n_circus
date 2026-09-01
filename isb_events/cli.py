@@ -31,6 +31,25 @@ def _window(week_of: str | None) -> DigestWindow:
     return DigestWindow.coming_week()
 
 
+def _windows(week_of: str | None) -> list[DigestWindow]:
+    """The weeks a bare `render` should refresh: the current one and the next.
+
+    An explicit `--week-of` means exactly that week and nothing else.
+
+    Rendering only `coming_week` was right while the cron ran once, on a
+    Saturday. It is wrong for a cron that runs daily: from Tuesday onwards
+    `coming_week` is *next* week, so today's and tomorrow's listings — the ones
+    the bot's day views read — would never be refreshed again until Monday.
+    Both weeks are rendered so that "what's on today" is as fresh as the last
+    run, and next week's digest is still built ahead of time.
+    """
+    if week_of:
+        return [DigestWindow.week_of(date.fromisoformat(week_of))]
+    current = DigestWindow.current_week()
+    coming = DigestWindow.coming_week()
+    return [current] if current == coming else [current, coming]
+
+
 def _week_start(window: DigestWindow) -> date:
     return window.start.date()
 
@@ -74,17 +93,20 @@ def fetch(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
 
 @app.command()
 def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
-    """Render this week's stored events into the `digests` row."""
-    window = _window(week_of)
+    """Render stored events into the `digests` row.
+
+    With no `--week-of`, refreshes both the current week and the coming one.
+    """
     with Store.open() as store:
-        result = run_fetch(window, store)
-        messages = render_events(result.events, window)
-        for line in result.footer_lines():
-            messages[-1] += f"\n{line}"
-        text = "\n\n===MESSAGE===\n\n".join(messages)
-        if dry_run:
-            typer.echo(text)
-        else:
+        for window in _windows(week_of):
+            result = run_fetch(window, store)
+            messages = render_events(result.events, window)
+            for line in result.footer_lines():
+                messages[-1] += f"\n{line}"
+            text = "\n\n===MESSAGE===\n\n".join(messages)
+            if dry_run:
+                typer.echo(text)
+                continue
             event_ids = [e.id for e in result.events]
             store.save_digest(_week_start(window), text, event_ids)
             # The same render, per event, so the bot can serve "what's on today"
