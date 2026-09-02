@@ -1,0 +1,130 @@
+name: Instagram probe
+
+# A throwaway diagnostic, not part of the pipeline. It answers one question:
+# does Instagram serve its og: tags to a GitHub runner?
+#
+# Fetching a public post URL returns the whole caption in og:title/og:description
+# — venue, date, time, price — which would make forwarded-link intake a plain GET
+# plus one extraction, with no vision and no login. That was verified from a
+# residential IP. Runners egress from Azure ranges, and Instagram is markedly
+# less tolerant of datacenter traffic, so the result here decides whether the
+# link path is buildable at all or whether intake has to be flyer-images only.
+#
+# Delete this workflow once the answer is recorded in CLAUDE.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Public Instagram post URL to probe."
+        required: false
+        type: string
+
+concurrency:
+  group: instagram-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Read through the environment, never interpolated into a run block —
+      # `${{ inputs.* }}` inline in a shell script is a script-injection hole.
+      PROBE_URL: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # curl_cffi lives in the pipeline extra; the point is to compare it
+      # against plain httpx, since which one works is the surprising part.
+      - run: uv sync --frozen --extra pipeline
+
+      - name: Where is this runner egressing from?
+        # A block is only interpretable if we know what got blocked. The
+        # runner's public IP is ephemeral and not a secret.
+        run: |
+          set -euo pipefail
+          ip=$(curl -s --max-time 15 https://api.ipify.org || echo "unknown")
+          echo "egress IP: $ip"
+          echo "- egress IP: \`$ip\`" >> "$GITHUB_STEP_SUMMARY"
+          curl -s --max-time 15 "https://ipinfo.io/$ip/org" \
+            | sed 's/^/- org: /' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: "Fetch the post and look for og: tags"
+        run: |
+          set -o pipefail
+          uv run python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import html
+          import os
+          import re
+          import time
+
+          DEFAULT = "https://www.instagram.com/p/DcL_UC2inUx/"
+          url = (os.environ.get("PROBE_URL") or "").strip() or DEFAULT
+
+          # Keep this a probe, not a general-purpose fetcher living in CI.
+          if not re.fullmatch(r"https://(www\.)?instagram\.com/(p|reel)/[\w-]+/?", url):
+              raise SystemExit(f"refusing to fetch a non-Instagram-post URL: {url!r}")
+
+          print(f"### Instagram probe\n\n- url: {url}\n")
+
+          def report(name, status, text, elapsed, err=None):
+              if err:
+                  print(f"**{name}** — ERROR after {elapsed:.1f}s: `{err}`\n")
+                  return
+              print(f"**{name}** — HTTP {status}, {len(text):,} bytes, {elapsed:.1f}s\n")
+              found = False
+              for prop in ("og:title", "og:description"):
+                  m = re.search(
+                      rf'<meta[^>]+property=["\']{prop}["\'][^>]+content=["\']([^"\']*)',
+                      text,
+                  )
+                  if m:
+                      found = True
+                      value = html.unescape(m.group(1))
+                      print(f"- `{prop}` ({len(value)} chars):")
+                      print("```")
+                      print(value[:600])
+                      print("```")
+                  else:
+                      print(f"- `{prop}`: **absent**")
+              if not found:
+                  # Distinguish a login wall from a rate limit from a hard block.
+                  signals = {
+                      "login wall": "loginForm" in text or "Log in to Instagram" in text,
+                      "rate limited": "Please wait a few minutes" in text,
+                      "challenge": "challenge" in text.lower()[:5000],
+                  }
+                  hit = [k for k, v in signals.items() if v] or ["none matched"]
+                  print(f"- signals: {', '.join(hit)}")
+                  print("- first 300 bytes:")
+                  print("```")
+                  print(text[:300])
+                  print("```")
+              print()
+
+          import httpx
+
+          t = time.monotonic()
+          try:
+              r = httpx.get(url, timeout=30, follow_redirects=True)
+              report("httpx (default UA)", r.status_code, r.text, time.monotonic() - t)
+          except Exception as e:
+              report("httpx (default UA)", None, "", time.monotonic() - t, err=f"{type(e).__name__}: {e}")
+
+          t = time.monotonic()
+          try:
+              from curl_cffi import requests as creq
+
+              r = creq.get(url, impersonate="chrome", timeout=30)
+              report("curl_cffi (chrome)", r.status_code, r.text, time.monotonic() - t)
+          except Exception as e:
+              report("curl_cffi (chrome)", None, "", time.monotonic() - t, err=f"{type(e).__name__}: {e}")
+          PY
