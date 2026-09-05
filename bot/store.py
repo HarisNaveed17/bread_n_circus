@@ -110,17 +110,26 @@ def digest_messages() -> list[str]:
 # newest digest row is already *next* week, so joining through `digests` would
 # make "what's on today" come back empty from Saturday lunchtime onwards. The
 # day is unambiguous by itself — digest weeks do not overlap.
-DAY_EVENTS_SQL = """
-SELECT day_label, block FROM digest_events
-WHERE event_date = ?
-ORDER BY starts_at
+RANGE_EVENTS_SQL = """
+SELECT event_date, day_label, block FROM digest_events
+WHERE event_date >= ? AND event_date <= ?
+ORDER BY event_date, starts_at
 """
+
+
+def events_between(start: date, end: date) -> list[tuple[str, str, str]]:
+    """`(event_date, day_label, block)` across an inclusive date range.
+
+    The pipeline always renders two weeks — the current one and the next — so
+    any window of seven days from today is fully covered by these rows.
+    """
+    rows = query(RANGE_EVENTS_SQL, [start.isoformat(), end.isoformat()])
+    return [(row[0] or "", row[1] or "", row[2] or "") for row in rows]
 
 
 def day_events(day: date) -> list[tuple[str, str]]:
     """`(day_label, block)` for everything on one day, in start order."""
-    rows = query(DAY_EVENTS_SQL, [day.isoformat()])
-    return [(row[0] or "", row[1] or "") for row in rows]
+    return [(label, block) for _, label, block in events_between(day, day)]
 
 
 # -- subscribers -------------------------------------------------------------

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from . import intent, store, whatsapp
 from .store import KARACHI
@@ -38,6 +38,18 @@ DAY_UNAVAILABLE_NOTE = "Here's the whole week instead."
 
 # Meta's cap on a text message body.
 WHATSAPP_LIMIT = 4096
+
+# How far ahead the default reply looks. Seven days rather than "this week"
+# because a calendar week is the wrong unit for the question people ask: on a
+# Sunday, the week containing today is over, and the week that has not started
+# is the one they mean. A rolling window sidesteps the boundary entirely — it
+# never shows a day that has passed and never hides one that is coming.
+# The pipeline renders two weeks every run, so seven days is always covered.
+UPCOMING_DAYS = 7
+MAX_UPCOMING = 20
+NOTHING_UPCOMING = (
+    "Nothing listed for the next {days} days yet — new listings go up through the week."
+)
 
 # Honouring a typed STOP is a Meta requirement, not a feature. Kept to exact
 # words rather than substring matching: "stop commenting on my body" is an
@@ -168,7 +180,7 @@ def _handle_message(message: dict) -> None:
     if word in OPT_IN_WORDS:
         store.opt_in(sender)
         whatsapp.send_text(sender, OPT_IN_REPLY)
-        _send_digest(sender)
+        _send_upcoming(sender)
         return
 
     _reply(sender, intent.parse(_body_text(message), today=_today()))
@@ -181,9 +193,69 @@ def _today() -> date:
 
 def _reply(to: str, wanted: intent.Filter) -> None:
     if wanted.kind == intent.WEEK:
-        _send_digest(to)
+        _send_upcoming(to)
         return
     _send_day(to, wanted)
+
+
+def _send_upcoming(to: str) -> None:
+    """The default reply: everything from today to `UPCOMING_DAYS` out.
+
+    Built from `digest_events`, not from the stored weekly text, so it crosses
+    the week boundary and never shows a day that has already happened.
+    """
+    today = _today()
+    try:
+        rows = store.events_between(today, today + timedelta(days=UPCOMING_DAYS - 1))
+    except Exception:
+        # `digest_events` not migrated yet (CLAUDE.md § Working notes). The
+        # stored weekly text is worse but it is not nothing.
+        log.exception("bot: upcoming view unavailable for %s; falling back", to)
+        _send_digest(to)
+        return
+
+    if not rows:
+        log.info("bot: nothing upcoming for %s", to)
+        whatsapp.send_text(to, NOTHING_UPCOMING.format(days=UPCOMING_DAYS))
+        return
+
+    cut = max(0, len(rows) - MAX_UPCOMING)
+    rows = rows[:MAX_UPCOMING]
+    days: list[tuple[str, list[str]]] = []
+    for _, label, block in rows:
+        if days and days[-1][0] == label:
+            days[-1][1].append(block)
+        else:
+            days.append((label, [block]))
+
+    header = f"*Islamabad — {days[0][0]} onwards*"
+    note = f"…and {cut} more not shown." if cut else ""
+    log.info("bot: sending %d upcoming event(s) to %s", len(rows), to)
+    for part in _with_hint(_pack_days(header, days, note)):
+        whatsapp.send_text(to, part)
+
+
+def _pack_days(header: str, days: list[tuple[str, list[str]]], note: str = "") -> list[str]:
+    """Header, then a heading and blocks per day, split at day boundaries."""
+    sections = ["\n\n".join([f"*{label}*", *blocks]) for label, blocks in days]
+    messages: list[str] = []
+    current = header
+    for section in sections:
+        candidate = f"{current}\n\n{section}"
+        if len(candidate) > WHATSAPP_LIMIT and current != header:
+            messages.append(current)
+            current = section
+        else:
+            current = candidate
+    if note:
+        addition = f"\n\n{note}"
+        if len(current) + len(addition) > WHATSAPP_LIMIT:
+            messages.append(current)
+            current = note
+        else:
+            current += addition
+    messages.append(current)
+    return messages
 
 
 def _send_day(to: str, wanted: intent.Filter) -> None:
@@ -245,9 +317,18 @@ def _send_digest(to: str) -> None:
         log.warning("bot: no digest stored; replying with the placeholder to %s", to)
         whatsapp.send_text(to, NO_DIGEST_REPLY)
         return
-    hint = f"\n\n{WEEK_HINT}"
-    if len(parts[-1]) + len(hint) <= WHATSAPP_LIMIT:
-        parts[-1] += hint
     log.info("bot: sending digest (%d message(s)) to %s", len(parts), to)
-    for part in parts:
+    for part in _with_hint(parts):
         whatsapp.send_text(to, part)
+
+
+def _with_hint(parts: list[str]) -> list[str]:
+    """Append the day-filter hint to the last message, if it fits.
+
+    Only the default reply carries it: someone who already asked for "today"
+    does not need telling that "today" works.
+    """
+    hint = f"\n\n{WEEK_HINT}"
+    if parts and len(parts[-1]) + len(hint) <= WHATSAPP_LIMIT:
+        parts = [*parts[:-1], parts[-1] + hint]
+    return parts

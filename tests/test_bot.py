@@ -7,7 +7,7 @@ directions (Turso read, Cloud API send), so nothing here touches the network.
 import hashlib
 import hmac
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,9 +19,27 @@ VERIFY_TOKEN = "test-verify-token"
 DIGEST = "*Islamabad — week of 31 Aug*\n\n• *Talk*\n🕒 7pm"
 
 
+# What `digest_events` hands back for the default reply: two days, one of them
+# in the following calendar week, which is the case a week-shaped reply got wrong.
+UPCOMING_ROWS = [
+    ("2026-09-06", "Sun 6 Sep", "• *Open Mic*\n🕒 7pm"),
+    ("2026-09-09", "Wed 9 Sep", "• *Naik Chor*\n🕒 6pm"),
+]
+UPCOMING_REPLY = (
+    "*Islamabad — Sun 6 Sep onwards*\n\n"
+    "*Sun 6 Sep*\n\n• *Open Mic*\n🕒 7pm\n\n"
+    "*Wed 9 Sep*\n\n• *Naik Chor*\n🕒 6pm"
+)
+
+
 def _week(*parts: str) -> list[str]:
-    """A full-week reply: the stored messages, with the day-filter hint on the last."""
+    """A fallback reply: the stored weekly text, with the day-filter hint last."""
     return [*parts[:-1], f"{parts[-1]}\n\n{app.WEEK_HINT}"]
+
+
+def _upcoming() -> list[str]:
+    """The default reply, built from digest_events rather than the weekly text."""
+    return [f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"]
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +103,10 @@ def stored_digest(monkeypatch):
         monkeypatch.setattr(store, "current_digest", lambda: (text, "2026-08-31"))
 
     monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
+    # The default reply reads digest_events, not the stored weekly text. Without
+    # this the rolling-window path would raise and silently fall back, and every
+    # assertion below would pass while testing the wrong code.
+    monkeypatch.setattr(store, "events_between", lambda a, b: UPCOMING_ROWS)
     _set(DIGEST)
     return _set
 
@@ -215,14 +237,14 @@ def test_unsigned_event_is_rejected_without_sending(sent, stored_digest):
 def test_message_gets_the_stored_digest(sent, stored_digest):
     raw, sig = _signed(_message_payload())
     assert app.handle_event(raw, sig) == (200, "ok")
-    assert sent == [("923001234567", *_week(DIGEST))]
+    assert sent == [("923001234567", *_upcoming())]
 
 
 def test_multi_part_digest_is_sent_as_separate_messages(sent, stored_digest):
     stored_digest(f"part one{store.MESSAGE_SEPARATOR}part two")
     raw, sig = _signed(_message_payload())
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == _week("part one", "part two")
+    assert [body for _, body in sent] == _upcoming()
 
 
 def test_any_text_gets_the_digest(sent, stored_digest):
@@ -305,7 +327,7 @@ def test_subscribe_opts_in_and_still_sends_the_digest(sent, stored_digest, write
     raw, sig = _signed(_message_payload(text="Subscribe"))
     app.handle_event(raw, sig)
     assert ("opt_in", "923001234567") in writes
-    assert [body for _, body in sent] == [app.OPT_IN_REPLY, *_week(DIGEST)]
+    assert [body for _, body in sent] == [app.OPT_IN_REPLY, *_upcoming()]
 
 
 def test_stop_opts_out_and_sends_no_digest(sent, stored_digest, writes):
@@ -320,7 +342,7 @@ def test_stop_matching_is_exact_not_substring(sent, stored_digest, writes):
     raw, sig = _signed(_message_payload(text="tell me about Stop Commenting on My Body"))
     app.handle_event(raw, sig)
     assert [name for name, _ in writes] == ["record_contact"]
-    assert [body for _, body in sent] == _week(DIGEST)
+    assert [body for _, body in sent] == _upcoming()
 
 
 def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, monkeypatch):
@@ -330,7 +352,7 @@ def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, mon
     monkeypatch.setattr(store, "record_contact", boom)
     raw, sig = _signed(_message_payload())
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == _week(DIGEST)
+    assert [body for _, body in sent] == _upcoming()
 
 
 def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
@@ -343,7 +365,7 @@ def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
     }
     raw, sig = _signed(payload)
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == _week(DIGEST)
+    assert [body for _, body in sent] == _upcoming()
 
 
 # -- the send endpoint -------------------------------------------------------
@@ -452,7 +474,7 @@ def test_wsgi_post_reads_the_signature_header(sent, stored_digest, writes):
     status, body = _wsgi_call(method="POST", body=raw, headers={"HTTP_X_HUB_SIGNATURE_256": sig})
     assert status.startswith("200")
     assert body == "ok"
-    assert [b for _, b in sent] == _week(DIGEST)
+    assert [b for _, b in sent] == _upcoming()
 
 
 def test_wsgi_post_without_a_signature_is_rejected(sent, stored_digest, writes):
@@ -719,17 +741,23 @@ def test_a_day_reply_splits_over_the_char_limit(sent, stored_digest, day_rows):
     assert all(len(body) <= app.WHATSAPP_LIMIT for _, body in sent)
 
 
-def test_the_week_reply_hints_at_the_day_filter(sent, stored_digest):
+def test_the_default_reply_hints_at_the_day_filter(sent, stored_digest):
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
-    assert sent[0][1] == f"{DIGEST}\n\n{app.WEEK_HINT}"
+    assert sent[0][1] == f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"
 
 
-def test_the_hint_is_dropped_rather_than_overflowing_a_message(sent, stored_digest):
-    stored_digest("y" * (app.WHATSAPP_LIMIT - 2))
+def test_the_hint_is_dropped_rather_than_overflowing_a_message(sent, stored_digest, monkeypatch):
+    # Sized so the packed message lands exactly on the limit: the hint can only
+    # be dropped, never truncated, and never split into a second message.
+    overhead = len("*Islamabad — Sun 6 Sep onwards*\n\n*Sun 6 Sep*\n\n")
+    big = "y" * (app.WHATSAPP_LIMIT - overhead)
+    monkeypatch.setattr(store, "events_between", lambda a, b: [("2026-09-06", "Sun 6 Sep", big)])
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
-    assert sent[0][1] == "y" * (app.WHATSAPP_LIMIT - 2)
+    assert len(sent) == 1
+    assert app.WEEK_HINT not in sent[0][1]
+    assert len(sent[0][1]) <= app.WHATSAPP_LIMIT
 
 
 def test_day_queries_do_not_count_as_consent(sent, stored_digest, day_rows, writes):
@@ -804,3 +832,83 @@ def test_falls_back_to_a_past_week_rather_than_the_placeholder(digest_rows):
 def test_no_rows_at_all_is_still_none(digest_rows):
     digest_rows({}, today=date(2026, 9, 2))
     assert store.current_digest() is None
+
+
+# -- the default reply is a rolling window, not a calendar week ---------------
+#
+# A week is the wrong unit for "what's on". Serving the week containing today
+# hides everything coming once the week is nearly over; serving the newest row
+# instead shows a week that has not started. Both were shipped, in that order.
+# These pin the rolling window that replaced them.
+
+
+def test_the_default_reply_crosses_the_week_boundary(sent, stored_digest):
+    """Sun 6 Sep and Wed 9 Sep are in different digest weeks, and both show."""
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    body = sent[0][1]
+    assert "*Sun 6 Sep*" in body and "*Wed 9 Sep*" in body
+
+
+def test_the_default_reply_asks_the_store_from_today_onward(sent, stored_digest, monkeypatch):
+    """Nothing before today: the old reply showed two days that had passed."""
+    asked = {}
+
+    def fake_between(start, end):
+        asked["start"], asked["end"] = start, end
+        return UPCOMING_ROWS
+
+    monkeypatch.setattr(store, "events_between", fake_between)
+    monkeypatch.setattr(app, "_today", lambda: date(2026, 9, 6))
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert asked["start"] == date(2026, 9, 6)
+    assert asked["end"] == date(2026, 9, 6) + timedelta(days=app.UPCOMING_DAYS - 1)
+
+
+def test_events_on_one_day_share_a_single_heading(sent, stored_digest, monkeypatch):
+    monkeypatch.setattr(
+        store,
+        "events_between",
+        lambda a, b: [
+            ("2026-09-06", "Sun 6 Sep", "• *Early*"),
+            ("2026-09-06", "Sun 6 Sep", "• *Late*"),
+            ("2026-09-07", "Mon 7 Sep", "• *Next day*"),
+        ],
+    )
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    body = sent[0][1]
+    assert body.count("*Sun 6 Sep*") == 1
+    assert body.index("• *Early*") < body.index("• *Late*") < body.index("*Mon 7 Sep*")
+
+
+def test_an_empty_window_does_not_claim_there_is_no_digest(sent, stored_digest, monkeypatch):
+    monkeypatch.setattr(store, "events_between", lambda a, b: [])
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert sent == [("923001234567", app.NOTHING_UPCOMING.format(days=app.UPCOMING_DAYS))]
+
+
+def test_the_upcoming_reply_is_capped_with_a_note(sent, stored_digest, monkeypatch):
+    rows = [(f"2026-09-{6 + n // 3:02d}", f"Day {n // 3}", f"• *Gig {n}*") for n in range(30)]
+    monkeypatch.setattr(store, "events_between", lambda a, b: rows)
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    body = "\n".join(b for _, b in sent)
+    assert f"…and {30 - app.MAX_UPCOMING} more not shown." in body
+    assert "• *Gig 0*" in body and f"• *Gig {app.MAX_UPCOMING}*" not in body
+
+
+def test_a_missing_digest_events_table_falls_back_to_the_stored_week(
+    sent, stored_digest, monkeypatch
+):
+    """Until the migration lands remotely, the weekly text is better than nothing."""
+
+    def boom(start, end):
+        raise RuntimeError("no such table: digest_events")
+
+    monkeypatch.setattr(store, "events_between", boom)
+    raw, sig = _signed(_message_payload(text="what's on"))
+    assert app.handle_event(raw, sig) == (200, "ok")
+    assert DIGEST in sent[0][1]
