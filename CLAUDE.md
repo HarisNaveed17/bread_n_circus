@@ -100,8 +100,9 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   the site sitting behind Cloudflare, so `curl_cffi` (still a `pyproject.toml`
   dependency) turned out to be unnecessary for this source. No price field
   exists anywhere in the API (checked list and detail responses), so
-  `price_text` is always `None` for Ticketwala events — unlike Black Hole,
-  there's no safe "assume free" default since Ticketwala sells paid tickets.
+  `price_text` was `None` for Ticketwala events until 2026-09-05, when the
+  price fetch landed — see [Ticketwala prices](#ticketwala-prices). The API
+  claim is still true; the prices simply are not in the API.
 - **M3 — done** (2026-09-02): fuzzy dedup/merge in `normalize.dedupe()`,
   using `rapidfuzz`. Built when the cron went twice-daily, because re-scraping
   the same week repeatedly is what makes a re-published listing land twice.
@@ -134,9 +135,8 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   today's and tomorrow's listings frozen until Monday. `current_week()` was
   added for exactly this.
   Two consequences to keep in mind. The bot no longer serves "the newest
-  digest row" — with next week's row written days ahead, that would answer
-  "what's on" with a week that has not started; `bot/store.current_digest()`
-  picks the week containing today instead. And `save_digest` resets `sent_at`
+  digest row" — nor a calendar week at all; see [The rolling
+  window](#the-rolling-window). And `save_digest` resets `sent_at`
   to NULL on every upsert, so it is now cleared twice a day — **Phase 2's
   nudge must not use `sent_at` as its "already nudged" flag**, or it will
   re-nudge every run. **Sends nothing on purpose** — delivery is
@@ -228,6 +228,66 @@ Three things worth knowing before loosening any of it:
   is a no-op on real data; its job is the duplicate that frequent scraping
   creates, a listing re-published under a new slug. A threshold change that
   starts merging real events will not show up in the unit tests.
+
+## The rolling window
+
+**A calendar week is the wrong unit for "what's on", and this was shipped wrong
+twice before it was fixed** (2026-09-06). Both attempts served a pre-rendered
+week from `digests.rendered_text`, and each failed at one end of it:
+
+- *Newest row wins* — from Tuesday, `coming_week()` has already written next
+  week's row, so the bot answered with a week that had not started.
+- *The week containing today* — the fix for that, which then failed on the
+  other side: asked on Sunday 6 Sep it replied with Fri 4 and Sat 5 (both
+  already past) plus today, and hid the eight events from Wed 9 onwards
+  because they sat in the next week's row.
+
+The default reply is now a **rolling seven days from today**, built from
+`digest_events` — the same table, blocks and day labels the `today`/`tomorrow`
+filters use. It cannot show a day that has passed and cannot hide one that is
+coming, and there is one reply path instead of two. The pipeline renders two
+weeks every run, so seven days is always covered.
+
+`rendered_text` is still written, and still what the run summary shows, but the
+bot only falls back to it when `digest_events` is unreachable.
+
+**`digest_events` stores rendered block text.** So a change to `render.py` —
+a new price line, a wording tweak — does not reach the bot until the pipeline
+next runs and rewrites those rows. Deploying the bot is not enough.
+
+## Ticketwala prices
+
+Built 2026-09-05, in `sources/ticketwala.py`. One extra GET per *in-window*
+event (~20/day at the current cadence); the listing API returns months and the
+digest shows a week, so pricing the rest would buy nothing.
+
+**Not an HTML scrape.** The event page is a Next.js app-router render with no
+`__NEXT_DATA__`. The tiers arrive inside `self.__next_f` as JSON embedded in an
+escaped JS string, carrying `title`/`price`/`persons`/`isFree`/`eventId`/
+`eventShowId`. Parsing that beats grepping the rendered `Rs 1,350` spans,
+which is what the original sketch proposed — and it is what makes the two rules
+below possible at all.
+
+Three things not to relearn:
+
+- **Group tickets are excluded from the range.** ConnectED lists a Standard
+  Ticket at Rs 1,350 and a "Group of 5" at Rs 4,750 — Rs 950 a head. Folding
+  that into a min-max advertises a Rs 1,350 event as costing up to Rs 4,750.
+  Only `persons == 1` tiers set the headline.
+- **Read every `tickets` array, not the first.** A page carries one per
+  `eventShowId`. Kaavish Live has six, and the first holds a single wheelchair
+  tier at Rs 10,000 — reading only that hid seventeen tiers spanning
+  Rs 3,000-18,000. A wrong price is worse than a missing one, and this was
+  caught only by comparing against the range already written down here.
+- **Two decoys in the data.** `priceRange` exists but is `"$$"`, a Yelp-style
+  band. And the API's `platformFee` / `paymentProcessingFee` are populated and
+  price-shaped, but they are booking fees — the easy way to "find" a price that
+  is not the ticket.
+
+A missing price now renders as `render.PRICE_UNKNOWN` ("Check with organiser")
+rather than an absent line, because a block with no 🎟 reads as free. That only
+became reasonable once prices were being fetched: before this, it fired on
+every Ticketwala event in the digest and said nothing at all.
 
 ## Delivery
 
@@ -373,6 +433,19 @@ happened.
 
 
 Checkable in seconds — verify rather than trust, this list goes stale.
+
+1. **SETTLED 2026-09-05: the schedule fires, but hours late.** Eight
+   consecutive scheduled runs since 2026-09-02, twice daily, none missed — so
+   whatever ailed `17 5 * * 6`, the twice-daily crons do not share it. What
+   they do share is delay, consistently and by a lot: the 06:17 UTC slot lands
+   10:39-11:22 (+4h22 to +5h05) and the 14:17 slot lands 16:49-17:54 (+2h32 to
+   +3h37). Asked for 11:17 and 19:17 Karachi, the digest actually refreshes
+   around 16:00 and 22:00.
+   Do not chase this by shifting the cron earlier — the delay ranges over two
+   and a half hours and is not stable enough to compensate for. If wall-clock
+   time ever matters, the fix is the external trigger named below. For
+   freshness alone it does not matter: twice a day is twice a day.
+   Original entry follows.
 
 1. **The schedule has still never fired; manual dispatch works fine.** Two
    `workflow_dispatch` runs on 2026-08-28 both went green end to end against
@@ -556,7 +629,11 @@ required and `render` groups by day, so an undated item cannot be represented.
 dated event while the tribe API has nothing upcoming. They're complementary,
 not either/or.
 
-### Ticketwala prices are recoverable after all
+### Ticketwala prices are recoverable after all — BUILT 2026-09-05
+
+**This section is now implemented**; see [Ticketwala prices](#ticketwala-prices)
+for what shipped and how it differs from the sketch below. Kept for the
+API-side reasoning, which is still accurate.
 
 The M2 note says no price field exists anywhere in the API. That is correct
 about the *API* — re-confirmed: `pricing`, `entry_fee` and `isFree` are all
