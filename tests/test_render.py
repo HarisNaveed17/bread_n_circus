@@ -10,7 +10,14 @@ from datetime import date, datetime
 
 from isb_events.models import KARACHI, DigestWindow, Event
 from isb_events.normalize import normalize
-from isb_events.render import MAX_EVENTS, SERIES_MARK, TIME_MARK, event_blocks, render
+from isb_events.render import (
+    MAX_EVENTS,
+    PRICE_UNKNOWN,
+    SERIES_MARK,
+    TIME_MARK,
+    event_blocks,
+    render,
+)
 
 WINDOW = DigestWindow.week_of(datetime(2026, 8, 24, tzinfo=KARACHI).date())
 
@@ -73,12 +80,22 @@ def test_time_venue_and_price_each_get_their_own_marked_line():
     assert "🎟 Free" in text
 
 
-def test_missing_fields_are_omitted_not_rendered_blank():
-    """Ticketwala never supplies a price and some cards have no venue."""
+def test_a_missing_venue_is_omitted_not_rendered_blank():
     text = "\n".join(render([_ev("Talk", 24)], WINDOW))
     assert "📍" not in text
-    assert "🎟" not in text
     assert "🕒 7pm" in text
+
+
+def test_a_missing_price_says_so_rather_than_going_silent():
+    """Ticketwala supplies no price, and an absent 🎟 line reads as "free"."""
+    text = "\n".join(render([_ev("Talk", 24)], WINDOW))
+    assert f"🎟 {PRICE_UNKNOWN}" in text
+
+
+def test_a_known_price_is_never_overwritten():
+    text = "\n".join(render([_ev("Talk", 24, price_text="Rs 2,000")], WINDOW))
+    assert "🎟 Rs 2,000" in text
+    assert PRICE_UNKNOWN not in text
 
 
 def test_recurring_series_collapsed_to_one_block():

@@ -37,6 +37,12 @@ SERIES_MARK = "🔁"
 VENUE_MARK = "📍"
 PRICE_MARK = "🎟"
 
+# Shown when a source gives no price at all. Saying nothing is worse than
+# saying "unknown": a block with no 🎟 line reads as "free", and most events
+# here are not. A venue we don't have is simply absent; a price we don't have
+# is a question the reader now knows to ask.
+PRICE_UNKNOWN = "Check with organiser"
+
 
 def _fmt_time(dt: datetime) -> str:
     dt = dt.astimezone(KARACHI)
@@ -83,8 +89,7 @@ def _event_block(event: Event, dates: list[datetime] | None = None) -> str:
         lines.append(f"{TIME_MARK} {_fmt_time(event.starts_at)}")
     if event.venue:
         lines.append(f"{VENUE_MARK} {event.venue}")
-    if event.price_text:
-        lines.append(f"{PRICE_MARK} {event.price_text}")
+    lines.append(f"{PRICE_MARK} {event.price_text or PRICE_UNKNOWN}")
     lines.append(event.url)
     return "\n".join(lines)
 
