@@ -103,4 +103,27 @@ jobs:
               print(f"- ticket tiers parsed: **{len(tickets)}**")
               print(f"- price_text: **{ticketwala.price_text_from_page(r.text, slug)}**")
           print()
+
+          # 4. The same page through curl_cffi. Cloudflare fingerprints the TLS
+          #    handshake, so a 403 for httpx says nothing about a browser-shaped
+          #    client. This is what curl_cffi has been a dependency *for*.
+          try:
+              from curl_cffi import requests as creq
+
+              t0 = time.monotonic()
+              cr = creq.get(f"https://ticketwala.pk/event/{slug}", impersonate="chrome", timeout=30)
+              el = time.monotonic() - t0
+              print(f"**ticketwala event page via curl_cffi** — HTTP {cr.status_code}, "
+                    f"{len(cr.text):,} bytes, {el:.1f}s")
+              if cr.status_code == 200:
+                  tickets = ticketwala.tickets_from_page(cr.text, slug)
+                  print(f"- ticket tiers parsed: **{len(tickets)}**")
+                  print(f"- price_text: **{ticketwala.price_text_from_page(cr.text, slug)}**")
+              else:
+                  print("```")
+                  print(cr.text[:300])
+                  print("```")
+          except Exception as e:
+              print(f"**curl_cffi** — ERROR `{type(e).__name__}: {e}`")
+          print()
           PY
