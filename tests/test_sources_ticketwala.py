@@ -11,6 +11,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from isb_events.models import KARACHI, DigestWindow
 from isb_events.sources import ticketwala
 from isb_events.sources.base import load_enabled_sources
@@ -187,3 +189,41 @@ def test_a_failed_price_fetch_leaves_the_event_intact(monkeypatch):
     monkeypatch.setattr(ticketwala, "fetch_price_text", lambda slug: None)
     events = ticketwala.TicketwalaSource().fetch(WINDOW)
     assert events and all(e.price_text is None for e in events)
+
+
+def test_a_cloudflare_block_stops_the_price_fetch_after_one_try(monkeypatch):
+    """403 from a datacenter IP is the state in CI, and it is not per-event.
+
+    Without this the run fires one blocked request per in-window event, twice a
+    day — ~40 Cloudflare challenges a day for nothing.
+    """
+    tried = []
+
+    def fake_price(slug):
+        tried.append(slug)
+        raise ticketwala.Blocked(slug)
+
+    monkeypatch.setattr(ticketwala, "_fetch_page", lambda t, p: EVENTS_PAYLOAD)
+    monkeypatch.setattr(ticketwala, "fetch_price_text", fake_price)
+    events = ticketwala.TicketwalaSource().fetch(WINDOW)
+    assert len(tried) == 1, f"asked {len(tried)} times after a block"
+    assert all(e.price_text is None for e in events)
+
+
+def test_a_403_raises_blocked_rather_than_returning_none(monkeypatch):
+    class _Resp:
+        status_code = 403
+        text = "<html>Just a moment...</html>"
+
+    monkeypatch.setattr(ticketwala.httpx, "get", lambda *a, **kw: _Resp())
+    with pytest.raises(ticketwala.Blocked):
+        ticketwala.fetch_price_text("x-1")
+
+
+def test_other_error_statuses_are_just_a_missing_price(monkeypatch):
+    class _Resp:
+        status_code = 500
+        text = ""
+
+    monkeypatch.setattr(ticketwala.httpx, "get", lambda *a, **kw: _Resp())
+    assert ticketwala.fetch_price_text("x-1") is None

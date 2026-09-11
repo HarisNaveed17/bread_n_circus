@@ -164,13 +164,24 @@ def price_text_from_page(html: str, slug: str | None = None) -> str | None:
     return f"Rs {int(low):,}–{int(high):,}"
 
 
+class Blocked(Exception):
+    """Cloudflare refused the event page. Every later page will refuse too."""
+
+
 def fetch_price_text(slug: str) -> str | None:
-    """One extra GET per event. Any failure means no price, never a crash."""
+    """One extra GET per event. Any failure means no price, never a crash.
+
+    Raises `Blocked` on a 403 so the caller can stop asking — see `add_prices`.
+    """
     try:
         resp = httpx.get(EVENT_URL.format(slug=slug), timeout=PAGE_TIMEOUT, follow_redirects=True)
-        resp.raise_for_status()
     except Exception:
         log.warning("ticketwala: could not fetch the event page for %s", slug, exc_info=True)
+        return None
+    if resp.status_code == 403:
+        raise Blocked(slug)
+    if resp.status_code != 200:
+        log.warning("ticketwala: event page for %s returned %s", slug, resp.status_code)
         return None
     return price_text_from_page(resp.text, slug)
 
@@ -230,11 +241,24 @@ def add_prices(events: list[Event], window: DigestWindow) -> list[Event]:
     current twice-daily cadence this is roughly 20 requests a day.
     """
     priced: list[Event] = []
+    blocked = False
     for event in events:
-        if not window.contains(event.starts_at) or event.price_text:
+        if blocked or not window.contains(event.starts_at) or event.price_text:
             priced.append(event)
             continue
-        price = fetch_price_text(_slug_of(event))
+        try:
+            price = fetch_price_text(_slug_of(event))
+        except Blocked:
+            # Stop at the first refusal rather than collecting one per event.
+            # The block is on the client, not the page: the *API* answers fine
+            # from the same host while the HTML 403s with Cloudflare's "Just a
+            # moment" interstitial, which curl_cffi does not get past either —
+            # it wants a browser, not a better TLS fingerprint. Confirmed from a
+            # GitHub runner 2026-09-11; prices work from a residential IP.
+            log.warning("ticketwala: event pages are blocked from this host; skipping prices")
+            blocked = True
+            priced.append(event)
+            continue
         priced.append(event.model_copy(update={"price_text": price}) if price else event)
     return priced
 
