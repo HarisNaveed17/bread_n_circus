@@ -332,10 +332,11 @@ Three things not to relearn:
   price-shaped, but they are booking fees — the easy way to "find" a price that
   is not the ticket.
 
-A missing price now renders as `render.PRICE_UNKNOWN` ("Check with organiser")
-rather than an absent line, because a block with no 🎟 reads as free. That only
-became reasonable once prices were being fetched: before this, it fired on
-every Ticketwala event in the digest and said nothing at all.
+**A missing price is left out**, like a missing venue. A "Check with organiser"
+placeholder was built and then removed on 2026-09-11: the reasoning for it was
+that a block with no 🎟 reads as free, which is true, but with event pages
+blocked from CI it landed on *every* paid event in the digest. A line that
+appears on everything tells the reader nothing.
 
 ## Delivery
 

@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 pipeline = [
+    "anthropic>=0.40",
     "curl_cffi>=0.7",
     "selectolax>=0.3.21",
     "pydantic>=2.7",
@@ -52,6 +53,10 @@ packages = ["isb_events"]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
+# Vendored agent tooling, not project code. CI runs `ruff check .` over the
+# whole tree, so without this a skill dropped into `.agents/` fails the build
+# on lint rules that were never meant to apply to it.
+extend-exclude = [".agents"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

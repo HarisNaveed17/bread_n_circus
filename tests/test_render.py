@@ -12,7 +12,6 @@ from isb_events.models import KARACHI, DigestWindow, Event
 from isb_events.normalize import normalize
 from isb_events.render import (
     MAX_EVENTS,
-    PRICE_UNKNOWN,
     SERIES_MARK,
     TIME_MARK,
     event_blocks,
@@ -86,16 +85,21 @@ def test_a_missing_venue_is_omitted_not_rendered_blank():
     assert "🕒 7pm" in text
 
 
-def test_a_missing_price_says_so_rather_than_going_silent():
-    """Ticketwala supplies no price, and an absent 🎟 line reads as "free"."""
+def test_a_missing_price_is_omitted_like_a_missing_venue():
+    """A placeholder was tried and removed.
+
+    Ticketwala event pages are blocked from CI, so "Check with organiser"
+    appeared on every paid event in the digest. A line that appears on
+    everything carries no information.
+    """
     text = "\n".join(render([_ev("Talk", 24)], WINDOW))
-    assert f"🎟 {PRICE_UNKNOWN}" in text
+    assert "🎟" not in text
+    assert "🕒 7pm" in text
 
 
-def test_a_known_price_is_never_overwritten():
+def test_a_known_price_is_still_shown():
     text = "\n".join(render([_ev("Talk", 24, price_text="Rs 2,000")], WINDOW))
     assert "🎟 Rs 2,000" in text
-    assert PRICE_UNKNOWN not in text
 
 
 def test_recurring_series_collapsed_to_one_block():
