@@ -1,0 +1,106 @@
+name: Source probe
+
+# A diagnostic, not part of the pipeline. It answers one question: do the
+# scrapers see the same web a laptop does?
+#
+# Runners egress from Azure ranges. theblackhole.pk sits on Bluehost shared
+# hosting behind a WAF, and ticketwala.pk behind Cloudflare — both of which
+# treat datacenter traffic differently from residential. The digest has been
+# rendering with zero Black Hole events and no Ticketwala prices while both
+# work fine locally, which is exactly the shape of an IP-based block.
+#
+# Delete once the answer is recorded in CLAUDE.md.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: source-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --extra pipeline
+
+      - name: Where is this runner egressing from?
+        run: |
+          set -euo pipefail
+          ip=$(curl -s --max-time 15 https://api.ipify.org || echo unknown)
+          echo "- egress IP: \`$ip\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          curl -s --max-time 15 "https://ipinfo.io/$ip/org" | sed 's/^/- org: /' \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Can the runner reach the sources?
+        run: |
+          set -o pipefail
+          uv run python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import time
+
+          import httpx
+
+          from isb_events.sources import blackhole, ticketwala
+
+          print("### Source probe\n")
+
+          def get(label, url, **kw):
+              t0 = time.monotonic()
+              try:
+                  r = httpx.get(url, timeout=30, follow_redirects=True, **kw)
+              except Exception as e:
+                  print(f"**{label}** — ERROR `{type(e).__name__}: {e}`\n")
+                  return None
+              el = time.monotonic() - t0
+              print(f"**{label}** — HTTP {r.status_code}, {len(r.text):,} bytes, {el:.1f}s")
+              print(f"- final URL: `{r.url}`")
+              if len(r.text) < 1000:
+                  print("- body is tiny — this is what a WAF block looks like:")
+                  print("```")
+                  print(r.text[:400] or "(empty)")
+                  print("```")
+              return r
+
+          # 1. Black Hole: the digest has had zero of these for days.
+          r = get("theblackhole.pk /upcoming-events/", "https://theblackhole.pk/upcoming-events/")
+          if r is not None and r.status_code == 200:
+              events = blackhole.parse(r.text)
+              print(f"- parsed **{len(events)}** events")
+              for e in sorted(events, key=lambda e: e.starts_at)[:8]:
+                  print(f"  - {e.starts_at:%Y-%m-%d %H:%M} {e.title[:60]}")
+          print()
+
+          # 2. Ticketwala's API — known to work, included as the control.
+          r = get(
+              "ticketwala API (control)",
+              "https://ticketwala.pk/api/public/events/public",
+              params={
+                  "type": "events", "countryId": "167", "present": "true",
+                  "city": "Islamabad", "page": 1, "perPage": 5,
+              },
+          )
+          if r is not None and r.status_code == 200:
+              try:
+                  print(f"- items: **{len(r.json().get('items', []))}**")
+              except Exception as e:
+                  print(f"- not JSON: {e}")
+          print()
+
+          # 3. A Ticketwala event *page* — where prices live. Different resource,
+          #    different protection: the API may pass while this is challenged.
+          slug = "kaavish-live-in-concert-7164"
+          r = get(f"ticketwala event page ({slug})", f"https://ticketwala.pk/event/{slug}")
+          if r is not None and r.status_code == 200:
+              tickets = ticketwala.tickets_from_page(r.text, slug)
+              print(f"- ticket tiers parsed: **{len(tickets)}**")
+              print(f"- price_text: **{ticketwala.price_text_from_page(r.text, slug)}**")
+          print()
+          PY
