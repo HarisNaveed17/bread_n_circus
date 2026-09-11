@@ -38,7 +38,8 @@ datetimes are timezone-aware in `Asia/Karachi`.
   `sources/__init__.py`).
 - `pipeline.py` — orchestrates fetch → normalize → dedupe → persist. Each
   source is fetched inside its own try/except so one broken source never
-  blocks the digest.
+  blocks the digest. **The digest is rendered from the store, not from the
+  fetch** (`cli._events_for`) — see [Render from the store](#render-from-the-store).
 - `normalize.py` — sets `series_key` (strips trailing "Session: N" markers) so
   `render.py` can collapse recurring series into one line, and tidies `title`
   and `venue` at ingest: de-shouts runs of 2+ all-caps words (a *lone* caps
@@ -196,6 +197,53 @@ the **Preview** environment in Vercel too (otherwise the health check fails on
 left on for previews, the smoke test needs
 `VERCEL_AUTOMATION_BYPASS_SECRET` as a repo secret. curl can send the bypass
 header; Meta cannot, which is why production protection stays off.
+
+## Render from the store
+
+**Fixed 2026-09-11, after several days of digests silently missing a whole
+source.** `cli.render` used to do `render_events(result.events, window)` — the
+events *this run's scrape returned*. The `events` table was written on every
+run and never read back, so a source that came back empty vanished from that
+run's digest entirely, with its events sitting in the store untouched.
+
+It is not hypothetical and it is not rare: theblackhole.pk answers a rate limit
+with an **HTTP 200 and an empty body**, which parses to zero events and is not
+an error, so `result.failures` stays empty and the run goes green. Black Hole
+was absent from six consecutive real digests while seven of its events sat in
+the store for that very week. The trigger was the move to a twice-daily cron
+rendering two windows — 4 fetches a day where there had been 1 a week.
+
+`Store.events_in_window()` reads the week back, `dedupe` runs over that, and
+the render uses it. A failed fetch now means "nothing new", not "nothing".
+
+The tradeoff, accepted deliberately: an event withdrawn at the source lingers
+until it ages out of the window. One stale line beats a silently half-empty
+digest. `tests/test_cli.py` pins the regression with a source that returns
+events once and nothing after.
+
+## Ticketwala prices do not work from CI
+
+**Confirmed from a GitHub runner 2026-09-11.** The price fetch
+([Ticketwala prices](#ticketwala-prices)) works from a residential IP and
+returns 403 from Actions. Three data points from one probe run, which is the
+useful part:
+
+| Request | From a runner |
+|---|---|
+| `theblackhole.pk/upcoming-events/` | **200**, 6 events parsed — not blocked |
+| `ticketwala.pk/api/...` (the listings API) | **200**, items returned |
+| `ticketwala.pk/event/<slug>` (the HTML) | **403** |
+
+So it is per-resource, not per-host: the API answers while the page refuses.
+The 403 body is Cloudflare's `Just a moment...` interstitial, and **`curl_cffi`
+does not get past it either** — it wants a browser, not a better TLS
+fingerprint. That closes the obvious fix; do not spend another evening on it.
+
+`add_prices` now stops at the first 403 rather than collecting one per event,
+which was ~40 challenged requests a day. Prices still work when the pipeline is
+run from a laptop. If they are wanted in production the shape is the one
+[Instagram automation](#instagram-automation--considered-not-recommended)
+suggests: a separate local tool that writes to Turso.
 
 ## Dedup (M3)
 
