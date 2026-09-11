@@ -12,7 +12,8 @@ from datetime import date
 
 import typer
 
-from .models import DigestWindow
+from .models import DigestWindow, Event
+from .normalize import dedupe
 from .notify.base import DryRunNotifier, Notifier
 from .pipeline import run_fetch
 from .render import event_blocks
@@ -52,6 +53,25 @@ def _windows(week_of: str | None) -> list[DigestWindow]:
 
 def _week_start(window: DigestWindow) -> date:
     return window.start.date()
+
+
+def _events_for(window: DigestWindow, store: Store, result) -> list[Event]:
+    """What the digest should show: everything stored for the week, deduped.
+
+    Not `result.events`. A fetch is one sample — theblackhole.pk answers a rate
+    limit with an empty 200, so an unlucky run used to render a digest with that
+    source silently missing while its events sat in the store untouched. Reading
+    the store back makes a failed fetch mean "nothing new", not "nothing at all".
+
+    Falls back to the fetch if the store read fails, so a broken query degrades
+    to the old behaviour rather than to an empty digest.
+    """
+    try:
+        stored = store.events_in_window(window)
+    except Exception:
+        logging.getLogger(__name__).exception("could not read stored events; using the fetch")
+        return result.events
+    return dedupe(stored)
 
 
 def _notifier(dry_run: bool) -> Notifier:
@@ -100,18 +120,18 @@ def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
     with Store.open() as store:
         for window in _windows(week_of):
             result = run_fetch(window, store)
-            messages = render_events(result.events, window)
+            events = _events_for(window, store, result)
+            messages = render_events(events, window)
             for line in result.footer_lines():
                 messages[-1] += f"\n{line}"
             text = "\n\n===MESSAGE===\n\n".join(messages)
             if dry_run:
                 typer.echo(text)
                 continue
-            event_ids = [e.id for e in result.events]
-            store.save_digest(_week_start(window), text, event_ids)
+            store.save_digest(_week_start(window), text, [e.id for e in events])
             # The same render, per event, so the bot can serve "what's on today"
             # without a second copy of the formatting rules. See render.event_blocks.
-            store.save_digest_events(_week_start(window), event_blocks(result.events, window))
+            store.save_digest_events(_week_start(window), event_blocks(events, window))
             typer.echo(f"saved digest for week of {_week_start(window)}")
 
 
@@ -141,13 +161,14 @@ def run(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
     week_start = _week_start(window)
     with Store.open() as store:
         result = run_fetch(window, store)
-        messages = render_events(result.events, window)
+        events = _events_for(window, store, result)
+        messages = render_events(events, window)
         for line in result.footer_lines():
             messages[-1] += f"\n{line}"
         text = "\n\n===MESSAGE===\n\n".join(messages)
         if not dry_run:
-            store.save_digest(week_start, text, [e.id for e in result.events])
-            store.save_digest_events(week_start, event_blocks(result.events, window))
+            store.save_digest(week_start, text, [e.id for e in events])
+            store.save_digest_events(week_start, event_blocks(events, window))
         _notifier(dry_run).send(messages)
         if not dry_run:
             store.mark_digest_sent(week_start)

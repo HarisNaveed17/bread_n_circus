@@ -16,7 +16,7 @@ from datetime import date, datetime
 import libsql_experimental
 import pytest
 
-from isb_events.models import KARACHI, Event
+from isb_events.models import KARACHI, DigestWindow, Event
 from isb_events.store import Store
 
 WEEK_OF = date(2026, 8, 31)
@@ -182,3 +182,46 @@ def test_subscriber_counts_separates_contacts_from_consent(store):
 
 def test_subscriber_counts_on_an_empty_table(store):
     assert store.subscriber_counts() == {"contacts": 0, "opted_in": 0}
+
+
+# -- reading the week back out ------------------------------------------------
+
+
+def test_events_in_window_round_trips_every_field(store):
+    original = _event(category="music", price_text="Rs 500", series_key="Kaavish")
+    store.upsert_event(original)
+    window = DigestWindow.week_of(date(2026, 9, 7))
+    (found,) = store.events_in_window(window)
+    assert found.id == original.id  # id is derived, so it must survive the trip
+    assert (found.title, found.venue, found.category) == ("Kaavish Live", original.venue, "music")
+    assert found.starts_at == original.starts_at
+    assert found.ends_at == original.ends_at
+    assert found.sources == ["ticketwala"]
+    assert found.series_key == "Kaavish"
+
+
+def test_events_in_window_excludes_other_weeks(store):
+    store.upsert_event(_event())  # 11 Sep
+    assert store.events_in_window(DigestWindow.week_of(date(2026, 9, 7))) != []
+    assert store.events_in_window(DigestWindow.week_of(date(2026, 8, 31))) == []
+
+
+def test_events_in_window_is_ordered_by_start(store):
+    store.upsert_event(_event(url="a", starts_at=datetime(2026, 9, 11, 20, tzinfo=KARACHI)))
+    store.upsert_event(_event(url="b", starts_at=datetime(2026, 9, 11, 9, tzinfo=KARACHI)))
+    found = store.events_in_window(DigestWindow.week_of(date(2026, 9, 7)))
+    assert [e.starts_at.hour for e in found] == [9, 20]
+
+
+def test_events_in_window_survives_an_unreadable_row(store):
+    """One corrupt row must not sink the digest."""
+    store.upsert_event(_event())
+    store._conn.execute("UPDATE events SET starts_at = 'not a date' WHERE id = ?", (_event().id,))
+    store._conn.commit()
+    assert store.events_in_window(DigestWindow.week_of(date(2026, 9, 7))) == []
+
+
+def test_events_in_window_handles_optional_fields_left_null(store):
+    store.upsert_event(_event(venue=None, ends_at=None))
+    (found,) = store.events_in_window(DigestWindow.week_of(date(2026, 9, 7)))
+    assert found.venue is None and found.ends_at is None

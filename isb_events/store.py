@@ -18,12 +18,15 @@ whole store against both to keep that honest.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import KARACHI, Event
+from .models import KARACHI, DigestWindow, Event
+
+log = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
@@ -120,6 +123,51 @@ class Store:
     def upsert_events(self, events: list[Event]) -> None:
         for event in events:
             self.upsert_event(event)
+
+    EVENT_COLUMNS = (
+        "title, venue, starts_at, ends_at, category, price_text, url, sources, "
+        "series_key, description"
+    )
+
+    def events_in_window(self, window: DigestWindow) -> list[Event]:
+        """Every stored event in the window, oldest first.
+
+        **The digest renders these, not whatever the current scrape returned.**
+        A source that returns nothing on one run — theblackhole.pk answers a
+        rate limit with an empty 200, and a run can simply be unlucky — used to
+        vanish from that run's digest entirely, even with its events sitting
+        right here. The store is the accumulated picture; a fetch is one
+        sample of it.
+
+        The tradeoff is that an event withdrawn at the source lingers until it
+        ages out of the window. That is the smaller harm: a stale listing is
+        one wrong line, a dropped source is a silently half-empty digest.
+        """
+        rows = self._conn.execute(
+            f"SELECT {self.EVENT_COLUMNS} FROM events "
+            "WHERE starts_at >= ? AND starts_at < ? ORDER BY starts_at",
+            (window.start.isoformat(), window.end.isoformat()),
+        ).fetchall()
+        events: list[Event] = []
+        for row in rows:
+            try:
+                events.append(
+                    Event(
+                        title=row[0],
+                        venue=row[1],
+                        starts_at=datetime.fromisoformat(row[2]),
+                        ends_at=datetime.fromisoformat(row[3]) if row[3] else None,
+                        category=row[4],
+                        price_text=row[5],
+                        url=row[6],
+                        sources=json.loads(row[7]) if row[7] else [],
+                        series_key=row[8],
+                        description=row[9],
+                    )
+                )
+            except Exception:  # a single unreadable row must not sink the digest
+                log.exception("store: could not rebuild an event from %r", row[0])
+        return events
 
     # -- digests --------------------------------------------------------------
 
