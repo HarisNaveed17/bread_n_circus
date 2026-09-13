@@ -101,9 +101,10 @@ grep `M[0-9]` across the repo before trusting this if it's been a while.
   the site sitting behind Cloudflare, so `curl_cffi` (still a `pyproject.toml`
   dependency) turned out to be unnecessary for this source. No price field
   exists anywhere in the API (checked list and detail responses), so
-  `price_text` was `None` for Ticketwala events until 2026-09-05, when the
-  price fetch landed — see [Ticketwala prices](#ticketwala-prices). The API
-  claim is still true; the prices simply are not in the API.
+  `price_text` is always `None` for Ticketwala events. A page-scraping price
+  fetch was built and removed — read
+  [Ticketwala prices](#ticketwala-prices--built-then-removed) before building
+  it again.
 - **M3 — done** (2026-09-02): fuzzy dedup/merge in `normalize.dedupe()`,
   using `rapidfuzz`. Built when the cron went twice-daily, because re-scraping
   the same week repeatedly is what makes a re-published listing land twice.
@@ -221,30 +222,6 @@ until it ages out of the window. One stale line beats a silently half-empty
 digest. `tests/test_cli.py` pins the regression with a source that returns
 events once and nothing after.
 
-## Ticketwala prices do not work from CI
-
-**Confirmed from a GitHub runner 2026-09-11.** The price fetch
-([Ticketwala prices](#ticketwala-prices)) works from a residential IP and
-returns 403 from Actions. Three data points from one probe run, which is the
-useful part:
-
-| Request | From a runner |
-|---|---|
-| `theblackhole.pk/upcoming-events/` | **200**, 6 events parsed — not blocked |
-| `ticketwala.pk/api/...` (the listings API) | **200**, items returned |
-| `ticketwala.pk/event/<slug>` (the HTML) | **403** |
-
-So it is per-resource, not per-host: the API answers while the page refuses.
-The 403 body is Cloudflare's `Just a moment...` interstitial, and **`curl_cffi`
-does not get past it either** — it wants a browser, not a better TLS
-fingerprint. That closes the obvious fix; do not spend another evening on it.
-
-`add_prices` now stops at the first 403 rather than collecting one per event,
-which was ~40 challenged requests a day. Prices still work when the pipeline is
-run from a laptop. If they are wanted in production the shape is the one
-[Instagram automation](#instagram-automation--considered-not-recommended)
-suggests: a separate local tool that writes to Turso.
-
 ## Dedup (M3)
 
 Built 2026-09-02. `normalize.dedupe()` merges two records only when **all** of
@@ -303,40 +280,45 @@ bot only falls back to it when `digest_events` is unreachable.
 a new price line, a wording tweak — does not reach the bot until the pipeline
 next runs and rewrites those rows. Deploying the bot is not enough.
 
-## Ticketwala prices
+## Ticketwala prices — built, then removed
 
-Built 2026-09-05, in `sources/ticketwala.py`. One extra GET per *in-window*
-event (~20/day at the current cadence); the listing API returns months and the
-digest shows a week, so pricing the rest would buy nothing.
+**Decided 2026-09-14: the digest shows no price for Ticketwala events.** Do
+not rebuild this. The reasoning, in the order it was learned:
 
-**Not an HTML scrape.** The event page is a Next.js app-router render with no
-`__NEXT_DATA__`. The tiers arrive inside `self.__next_f` as JSON embedded in an
-escaped JS string, carrying `title`/`price`/`persons`/`isFree`/`eventId`/
-`eventShowId`. Parsing that beats grepping the rendered `Rs 1,350` spans,
-which is what the original sketch proposed — and it is what makes the two rules
-below possible at all.
+1. **The API has no price.** Checked twice: `entry_fee` and `isFree` are null
+   on both list and detail responses, and no "Rs" string appears anywhere in
+   the 96-key detail response. Two decoys sit right where a price would be —
+   `platformFee` and `paymentProcessingFee` are populated, and are booking
+   fees, not the ticket. `priceRange` exists and is `"$$"`.
+2. **The prices are in the event page**, inside the Next.js `self.__next_f`
+   payload as JSON in an escaped JS string. A scraper for it worked, and took
+   the live week from 0 of 8 events priced to 8 of 8.
+3. **It does not work from CI.** The event page returns 403 from a GitHub
+   runner while the listings API on the same host answers fine — per-resource,
+   not per-host. The 403 body is Cloudflare's `Just a moment...` interstitial,
+   and **`curl_cffi` does not get past it either**: it wants a browser, not a
+   better TLS fingerprint. That closes the obvious fix.
+4. **So it only ever worked on a laptop.** A local render produced a richer
+   digest than the cron did, which is the worst kind of difference — nothing
+   surfaces it.
 
-Three things not to relearn:
+Deleted 2026-09-14 with 195KB of page fixtures. It was not small: escaped-JSON
+extraction, accumulation across one `tickets` array per `eventShowId`,
+group-ticket filtering (a "Group of 5" at Rs 4,750 is Rs 950 a head, and
+folding it into a range trebles the apparent price), and a circuit breaker for
+the 403s.
 
-- **Group tickets are excluded from the range.** ConnectED lists a Standard
-  Ticket at Rs 1,350 and a "Group of 5" at Rs 4,750 — Rs 950 a head. Folding
-  that into a min-max advertises a Rs 1,350 event as costing up to Rs 4,750.
-  Only `persons == 1` tiers set the headline.
-- **Read every `tickets` array, not the first.** A page carries one per
-  `eventShowId`. Kaavish Live has six, and the first holds a single wheelchair
-  tier at Rs 10,000 — reading only that hid seventeen tiers spanning
-  Rs 3,000-18,000. A wrong price is worse than a missing one, and this was
-  caught only by comparing against the range already written down here.
-- **Two decoys in the data.** `priceRange` exists but is `"$$"`, a Yelp-style
-  band. And the API's `platformFee` / `paymentProcessingFee` are populated and
-  price-shaped, but they are booking fees — the easy way to "find" a price that
-  is not the ticket.
+**The reason it is not missed: the URL is already on the line below.** Anyone
+who cares taps through to a booking page more current than a weekly scrape.
 
-**A missing price is left out**, like a missing venue. A "Check with organiser"
-placeholder was built and then removed on 2026-09-11: the reasoning for it was
-that a block with no 🎟 reads as free, which is true, but with event pages
-blocked from CI it landed on *every* paid event in the digest. A line that
-appears on everything tells the reader nothing.
+A "Check with organiser" placeholder was built alongside it and removed for the
+same reason — with prices blocked it landed on every paid event, and a line
+that appears on everything tells the reader nothing. A missing price is now
+omitted, like a missing venue.
+
+If prices are ever wanted again the shape is a separate local tool writing to
+Turso, as for [Instagram automation](#instagram-automation--considered-not-recommended),
+not a scrape inside the cron.
 
 ## Delivery
 
@@ -678,11 +660,13 @@ required and `render` groups by day, so an undated item cannot be represented.
 dated event while the tribe API has nothing upcoming. They're complementary,
 not either/or.
 
-### Ticketwala prices are recoverable after all — BUILT 2026-09-05
+### Ticketwala prices are recoverable after all — BUILT AND REMOVED
 
-**This section is now implemented**; see [Ticketwala prices](#ticketwala-prices)
-for what shipped and how it differs from the sketch below. Kept for the
-API-side reasoning, which is still accurate.
+Built 2026-09-05, deleted 2026-09-14 once it turned out to work everywhere
+except CI. See [Ticketwala prices](#ticketwala-prices--built-then-removed).
+The API reasoning below still holds; note the sketch's `grep 'Rs'` approach is
+*worse* than what was built, because it misses pages whose prices never reach
+rendered HTML.
 
 The M2 note says no price field exists anywhere in the API. That is correct
 about the *API* — re-confirmed: `pricing`, `entry_fee` and `isFree` are all
