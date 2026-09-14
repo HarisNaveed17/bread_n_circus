@@ -57,10 +57,27 @@ class Store:
         conn.row_factory = sqlite3.Row
         return cls(conn)
 
+    # Columns added to an existing table, after the fact. These cannot live in a
+    # .sql migration: `_migrate()` replays every file on every `open()`, and
+    # `ALTER TABLE ... ADD COLUMN` is not idempotent — it raises "duplicate
+    # column name" the second time. Asking the table what it already has is.
+    ADDED_COLUMNS = {"events": {"source_ref": "TEXT"}}
+
     def _migrate(self) -> None:
         for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
             self._conn.executescript(sql_file.read_text())
+        self._add_missing_columns()
         self._conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        for table, columns in self.ADDED_COLUMNS.items():
+            # `.fetchall()`, not iteration: a libSQL cursor is not iterable.
+            rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            present = {row[1] for row in rows}
+            for name, decl in columns.items():
+                if name not in present:
+                    log.info("store: adding %s.%s", table, name)
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def __enter__(self) -> Store:
         return self
@@ -80,11 +97,11 @@ class Store:
             """
             INSERT INTO events (
                 id, title, venue, starts_at, ends_at, category, price_text,
-                url, sources, series_key, description, raw_json,
+                url, source_ref, sources, series_key, description, raw_json,
                 first_seen, last_seen
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
@@ -95,6 +112,7 @@ class Store:
                 category    = excluded.category,
                 price_text  = excluded.price_text,
                 url         = excluded.url,
+                source_ref  = excluded.source_ref,
                 sources     = excluded.sources,
                 series_key  = excluded.series_key,
                 description = excluded.description,
@@ -110,6 +128,7 @@ class Store:
                 event.category,
                 event.price_text,
                 event.url,
+                event.source_ref,
                 json.dumps(event.sources),
                 event.series_key,
                 event.description,
@@ -125,8 +144,8 @@ class Store:
             self.upsert_event(event)
 
     EVENT_COLUMNS = (
-        "title, venue, starts_at, ends_at, category, price_text, url, sources, "
-        "series_key, description"
+        "title, venue, starts_at, ends_at, category, price_text, url, source_ref, "
+        "sources, series_key, description"
     )
 
     def events_in_window(self, window: DigestWindow) -> list[Event]:
@@ -160,9 +179,10 @@ class Store:
                         category=row[4],
                         price_text=row[5],
                         url=row[6],
-                        sources=json.loads(row[7]) if row[7] else [],
-                        series_key=row[8],
-                        description=row[9],
+                        source_ref=row[7],
+                        sources=json.loads(row[8]) if row[8] else [],
+                        series_key=row[9],
+                        description=row[10],
                     )
                 )
             except Exception:  # a single unreadable row must not sink the digest

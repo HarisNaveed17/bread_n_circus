@@ -90,7 +90,8 @@ def _event_block(event: Event, dates: list[datetime] | None = None) -> str:
     # that appears on everything tells the reader nothing.
     if event.price_text:
         lines.append(f"{PRICE_MARK} {event.price_text}")
-    lines.append(event.url)
+    if event.url:
+        lines.append(event.url)
     return "\n".join(lines)
 
 

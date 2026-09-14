@@ -81,7 +81,14 @@ class Event(BaseModel):
     ends_at: datetime | None = None
     category: str | None = None
     price_text: str | None = None
-    url: str
+    # Optional because a forwarded listing often has no per-event link: two of
+    # three real WhatsApp samples say "DM us" or give a phone number. `render`
+    # leaves the line out rather than inventing one.
+    url: str | None = None
+    # What `id` hashes, when the URL is not the right identity. A forwarded
+    # message has no URL to be unique by, and using the organiser's page would
+    # collapse every event they ever send into one row.
+    source_ref: str | None = None
     sources: list[str] = Field(default_factory=list)
     series_key: str | None = None
     description: str | None = None
@@ -113,11 +120,18 @@ class Event(BaseModel):
 
     @property
     def id(self) -> str:
-        """Deterministic id from (primary_source, url).
+        """Deterministic id from (primary_source, source_ref or url).
 
         Stable across runs so the store can upsert. Dedup may merge two events
         into one; the survivor keeps its own id.
+
+        `source_ref` takes precedence but defaults to the URL, so every scraped
+        source keeps the ids it already has — changing the formula outright
+        would orphan every stored row and duplicate the whole events table.
+        A listing with neither falls back to title and start time, which is not
+        as stable but is at least distinct per event rather than per organiser.
         """
         primary = self.primary_source or ""
-        digest = hashlib.sha256(f"{primary}\n{self.url}".encode()).hexdigest()
+        ref = self.source_ref or self.url or f"{self.title}\n{self.starts_at.isoformat()}"
+        digest = hashlib.sha256(f"{primary}\n{ref}".encode()).hexdigest()
         return digest[:16]
