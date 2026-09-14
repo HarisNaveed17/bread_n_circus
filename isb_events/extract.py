@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Literal
@@ -51,12 +52,20 @@ class Listing:
 class Extraction(BaseModel):
     """The only shape the model may return.
 
-    **Deliberately has no free-text field**, and that is a privacy control, not
-    a style choice. A real forwarded newsletter carried an IBAN, a bank account
-    title, a third party's mobile number and the recipient's name. A strict
-    schema *is* the PII filter: if there is nowhere to put an IBAN, one cannot
-    reach the store. `decline_reason` is an enum for the same reason — a
-    free-text explanation would happily quote the thing being filtered out.
+    **Every field is either an enum or a constrained string**, and that is a
+    privacy control, not a style choice. A real forwarded newsletter carried an
+    IBAN, a bank account title, a third party's mobile number and the
+    recipient's name. A narrow schema *is* the PII filter: if there is nowhere
+    to put an IBAN, one cannot reach the store. `decline_reason` is an enum for
+    the same reason — a free-text explanation would happily quote the thing
+    being filtered out.
+
+    `registration_phone` is the one deliberate exception, and it is exactly as
+    wide as it needs to be. "To register, WhatsApp: 0303 5667670" is the whole
+    call to action for that event; dropping it leaves a listing nobody can act
+    on. It is a number the organiser published *so that people would use it*,
+    which is not the same as a bank account that happened to be in the thread —
+    and `_clean_phone` enforces the difference by shape.
     """
 
     is_event: bool
@@ -68,6 +77,12 @@ class Extraction(BaseModel):
     venue: str | None = None
     price_text: str | None = None
     category: str | None = None
+    # The number to contact to book a place, when that is how booking works.
+    # Narrow on purpose: a published registration line is the organiser's call
+    # to action, not incidental personal data, and an entry without it is not
+    # actionable. `_clean_phone` rejects anything that is not phone-shaped, so
+    # an account number cannot ride in through this field.
+    registration_phone: str | None = None
 
 
 SYSTEM = """\
@@ -106,6 +121,11 @@ Islamabad date, set is_event false with decline_reason "not_an_event".
 10. When a price depends on how you buy rather than on what you get, give \
 both briefly: "Rs 1,500 online, Rs 2,000 on the door". When it depends on \
 group size, give the per-person price.
+11. registration_phone is ONLY the number a reader must contact to book a \
+place, when the text says to call, WhatsApp or message it. Leave it null if \
+booking happens through a link, or if no number is given. Never put a bank \
+account number, an IBAN, an account title, or a number that appears for any \
+other reason in this field or any other field.
 """
 
 
@@ -142,6 +162,38 @@ def _content(listing: Listing) -> list[dict]:
     posted = listing.posted_at.isoformat() if listing.posted_at else "unknown"
     blocks.append({"type": "text", "text": f"Post date: {posted}\n\n{listing.text}"})
     return blocks
+
+
+# A Pakistani mobile is exactly 11 digits and starts 03 ("0303 5667670"), or
+# the same number with the country code in place of the leading zero
+# ("+92 303 5667670"). No brackets: that is not how they are written here.
+#
+# This is deliberately the tightest rule that still accepts a real number. The
+# field exists for "WhatsApp this number to register", so it only ever needs to
+# match a mobile — and a length this exact is what makes it structurally unable
+# to carry an account number or an IBAN, whatever the model was told.
+PHONE_DIGITS = 11
+_LOCAL_PREFIX = "03"
+
+
+def _clean_phone(value: str | None) -> str | None:
+    """Return the number as `0303 5667670`, or None if it is not one.
+
+    The model is told what belongs in this field. This is the check that does
+    not depend on it having listened.
+    """
+    if not value or "(" in value or ")" in value:
+        return None
+    digits = re.sub(r"\D", "", value)
+    # The country code stands in for the leading zero, so put it back rather
+    # than just stripping: +92 320 1234568 and 0320 1234568 are one number.
+    for prefix in ("0092", "92"):
+        if digits.startswith(prefix) and len(digits) == PHONE_DIGITS - 1 + len(prefix):
+            digits = "0" + digits[len(prefix) :]
+            break
+    if len(digits) != PHONE_DIGITS or not digits.startswith(_LOCAL_PREFIX):
+        return None
+    return f"{digits[:4]} {digits[4:]}"
 
 
 def _starts_at(day: str, clock: str) -> datetime | None:
@@ -186,6 +238,7 @@ def to_event(found: Extraction, listing: Listing) -> Event | None:
         ends_at=ends_at,
         category=(found.category or "").strip() or None,
         price_text=(found.price_text or "").strip() or None,
+        contact_phone=_clean_phone(found.registration_phone),
         url=listing.url,
         source_ref=listing.source_ref,
         sources=[listing.source],

@@ -241,13 +241,24 @@ Runs in the pipeline, never the bot. `bot/` reaches Turso over HTTP with
 client there would break that for nothing. The bot stores raw text, the
 pipeline parses it. `anthropic` is in the `pipeline` extra.
 
-**The schema is the PII filter.** `Extraction` has no free-text field and
-`decline_reason` is an enum, both deliberately. A real forwarded newsletter
+**The schema is the PII filter.** Every field is an enum or a constrained
+string, and `decline_reason` is an enum rather than free text, both
+deliberately. A real forwarded newsletter
 carried an IBAN, a bank account title, a stranger's mobile number and the
 recipient's name; one of the WhatsApp samples carries a phone number. If there
 is nowhere to put a phone number, one cannot reach Turso — and a free-text
 "why I declined" would quote it straight back. `tests/test_extract.py` asserts
 the exact field set, so widening it is a conscious act.
+
+**`registration_phone` is the one deliberate exception**, added 2026-09-14.
+"To register, WhatsApp: 0303 5667670" is the whole call to action for that
+event, and a listing nobody can act on is not worth printing. A number an
+organiser published *so that people would use it* is not the same as a bank
+account that happened to be in the thread — and `_clean_phone` enforces the
+difference by shape rather than by trusting the prompt: exactly 11 digits
+starting `03`, or the same with `+92` in place of the leading zero. No
+brackets, no landlines (you cannot WhatsApp one). That length is exact enough
+that an IBAN or an account number structurally cannot fit.
 
 **Refusal is a feature, not a failure.** A caption reading "the first time was
 so nice, we had to do it twice / this sunday! / -/600 per person" must produce

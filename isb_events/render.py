@@ -36,6 +36,7 @@ TIME_MARK = "🕒"
 SERIES_MARK = "🔁"
 VENUE_MARK = "📍"
 PRICE_MARK = "🎟"
+PHONE_MARK = "📱"
 
 
 def _fmt_time(dt: datetime) -> str:
@@ -90,6 +91,10 @@ def _event_block(event: Event, dates: list[datetime] | None = None) -> str:
     # that appears on everything tells the reader nothing.
     if event.price_text:
         lines.append(f"{PRICE_MARK} {event.price_text}")
+    # Some organisers take bookings only by message. Without this the listing
+    # says what is on and gives the reader no way to get in.
+    if event.contact_phone:
+        lines.append(f"{PHONE_MARK} {event.contact_phone}")
     if event.url:
         lines.append(event.url)
     return "\n".join(lines)

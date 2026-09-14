@@ -61,7 +61,7 @@ class Store:
     # .sql migration: `_migrate()` replays every file on every `open()`, and
     # `ALTER TABLE ... ADD COLUMN` is not idempotent — it raises "duplicate
     # column name" the second time. Asking the table what it already has is.
-    ADDED_COLUMNS = {"events": {"source_ref": "TEXT"}}
+    ADDED_COLUMNS = {"events": {"source_ref": "TEXT", "contact_phone": "TEXT"}}
 
     def _migrate(self) -> None:
         for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
@@ -97,11 +97,11 @@ class Store:
             """
             INSERT INTO events (
                 id, title, venue, starts_at, ends_at, category, price_text,
-                url, source_ref, sources, series_key, description, raw_json,
+                url, source_ref, contact_phone, sources, series_key, description, raw_json,
                 first_seen, last_seen
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?,
                 ?, ?
             )
             ON CONFLICT(id) DO UPDATE SET
@@ -113,6 +113,7 @@ class Store:
                 price_text  = excluded.price_text,
                 url         = excluded.url,
                 source_ref  = excluded.source_ref,
+                contact_phone = excluded.contact_phone,
                 sources     = excluded.sources,
                 series_key  = excluded.series_key,
                 description = excluded.description,
@@ -129,6 +130,7 @@ class Store:
                 event.price_text,
                 event.url,
                 event.source_ref,
+                event.contact_phone,
                 json.dumps(event.sources),
                 event.series_key,
                 event.description,
@@ -145,7 +147,7 @@ class Store:
 
     EVENT_COLUMNS = (
         "title, venue, starts_at, ends_at, category, price_text, url, source_ref, "
-        "sources, series_key, description"
+        "contact_phone, sources, series_key, description"
     )
 
     def events_in_window(self, window: DigestWindow) -> list[Event]:
@@ -180,9 +182,10 @@ class Store:
                         price_text=row[5],
                         url=row[6],
                         source_ref=row[7],
-                        sources=json.loads(row[8]) if row[8] else [],
-                        series_key=row[9],
-                        description=row[10],
+                        contact_phone=row[8],
+                        sources=json.loads(row[9]) if row[9] else [],
+                        series_key=row[10],
+                        description=row[11],
                     )
                 )
             except Exception:  # a single unreadable row must not sink the digest

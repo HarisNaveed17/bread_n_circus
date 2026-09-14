@@ -203,16 +203,17 @@ def test_extract_all_keeps_what_succeeds():
     assert extract_all([_listing()], client=client) == []
 
 
-def test_the_schema_has_nowhere_to_put_pii():
-    """The strict schema *is* the privacy filter, so its shape is load-bearing.
+def test_the_schema_stays_narrow():
+    """The schema *is* the privacy filter, so its shape is load-bearing.
 
     A real forwarded newsletter carried an IBAN, a bank account title, a third
-    party's mobile number and the recipient's name. None of them have a field
-    to land in, and `decline_reason` is an enum precisely so a free-text
-    explanation cannot quote them back.
+    party's mobile number and the recipient's name. Only `registration_phone`
+    can hold a number at all, and only a phone-shaped one. `decline_reason` is
+    an enum precisely so a free-text explanation cannot quote the rest back.
+
+    Widening this set is a deliberate act. Make it one.
     """
-    fields = set(Extraction.model_fields)
-    assert fields == {
+    assert set(Extraction.model_fields) == {
         "is_event",
         "decline_reason",
         "title",
@@ -222,9 +223,88 @@ def test_the_schema_has_nowhere_to_put_pii():
         "venue",
         "price_text",
         "category",
+        "registration_phone",
     }
     reason = Extraction.model_fields["decline_reason"].annotation
     assert "str" not in str(reason).replace("Literal", "")
+
+
+# -- the registration number -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "given,expected",
+    [
+        ("0303 5667670", "0303 5667670"),
+        ("  0303   5667670 ", "0303 5667670"),
+        ("0303-566-7670", "0303 5667670"),
+        ("03035667670", "0303 5667670"),
+        # The country code replaces the leading zero; normalise it back, since
+        # the digest is read by a local audience.
+        ("+92 303 5667670", "0303 5667670"),
+        ("0092 303 5667670", "0303 5667670"),
+    ],
+)
+def test_a_published_registration_number_is_kept(given, expected):
+    """ "To register, WhatsApp: 0303 5667670" is the whole call to action."""
+    found = Extraction(
+        is_event=True,
+        title="X",
+        date="2026-09-05",
+        start_time="14:00",
+        registration_phone=given,
+    )
+    assert to_event(found, _listing()).contact_phone == expected
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "PK36SCBL0000001123456702",  # an IBAN
+        "1234567890123456",  # a card or long account number
+        "12345678901",  # 11 digits but not a mobile prefix
+        "051 1234567",  # a landline: you cannot WhatsApp it
+        "(0303) 5667670",  # brackets are not how these are written
+        "0303 566767",  # a digit short
+        "0303 56676701",  # a digit over
+        "Account Title: Some Person",
+        "Rs 5,000",
+        "",
+        "   ",
+    ],
+)
+def test_anything_that_is_not_a_pakistani_mobile_is_dropped(given):
+    """Too loose is the dangerous direction: a wrong number is worse than none.
+
+    Eleven digits starting 03 is exact enough that an account number cannot
+    fit, whatever the model was told to do.
+    """
+    found = Extraction(
+        is_event=True,
+        title="X",
+        date="2026-09-05",
+        start_time="14:00",
+        registration_phone=given,
+    )
+    assert to_event(found, _listing()).contact_phone is None
+
+
+def test_the_number_reaches_the_rendered_block():
+    from isb_events.models import DigestWindow
+    from isb_events.render import render
+
+    found = Extraction(
+        is_event=True,
+        title="Starry Night Painting Workshop",
+        date="2026-09-05",
+        start_time="14:00",
+        venue="TW Den, F-7 Markaz",
+        price_text="Rs 5,000",
+        registration_phone="0303 5667670",
+    )
+    event = to_event(found, whatsapp.listing_from_message(PAINTING, received_at=RECEIVED))
+    text = "\n".join(render([event], DigestWindow.week_of(date(2026, 8, 31))))
+    assert "📱 0303 5667670" in text
 
 
 # -- the WhatsApp adapter ----------------------------------------------------

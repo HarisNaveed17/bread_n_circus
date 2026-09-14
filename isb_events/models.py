@@ -81,6 +81,9 @@ class Event(BaseModel):
     ends_at: datetime | None = None
     category: str | None = None
     price_text: str | None = None
+    # How to book, when booking is "message this number". Validated by shape at
+    # extraction time so an account number cannot arrive here.
+    contact_phone: str | None = None
     # Optional because a forwarded listing often has no per-event link: two of
     # three real WhatsApp samples say "DM us" or give a phone number. `render`
     # leaves the line out rather than inventing one.
