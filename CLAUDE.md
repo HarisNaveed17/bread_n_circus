@@ -60,6 +60,14 @@ datetimes are timezone-aware in `Asia/Karachi`.
   under `--dry-run` and otherwise reports that there is no push channel.
 - `notify/base.py` — the `Notifier` seam. `DryRunNotifier` is the only
   implementation; the nudge sender lands in Phase 2.
+- `extract.py` — **one extractor for every intake path.** A `Listing` (text +
+  source + optional url/source_ref/posted_at/image) goes in, an `Event` or a
+  refusal comes out. Sources differ in how the text is *obtained*, not in what
+  must be pulled from it, so the adapters are thin and the prompt, schema, date
+  resolution and refusal rules are shared. See
+  [Intake extraction](#intake-extraction).
+- `sources/instagram.py`, `sources/whatsapp.py` — the two adapters. Neither
+  parses an event; they build a `Listing`.
 - `bot/intent.py` — message text → a `Filter` (`today`/`tomorrow`/the week).
   Word-list matching, not a model: three phrases is not an NLP problem and Meta
   retries a webhook that answers slowly. Categories join as another word list
@@ -221,6 +229,65 @@ The tradeoff, accepted deliberately: an event withdrawn at the source lingers
 until it ages out of the window. One stale line beats a silently half-empty
 digest. `tests/test_cli.py` pins the regression with a source that returns
 events once and nothing after.
+
+## Intake extraction
+
+Built 2026-09-14, **unverified against a live model** — see the caveat at the
+end. `extract.Listing` is the seam: Instagram and WhatsApp adapters build one,
+`extract()` turns it into an `Event` or declines.
+
+Runs in the pipeline, never the bot. `bot/` reaches Turso over HTTP with
+`httpx` alone so Vercel ships no compiled driver into the function; an LLM
+client there would break that for nothing. The bot stores raw text, the
+pipeline parses it. `anthropic` is in the `pipeline` extra.
+
+**The schema is the PII filter.** `Extraction` has no free-text field and
+`decline_reason` is an enum, both deliberately. A real forwarded newsletter
+carried an IBAN, a bank account title, a stranger's mobile number and the
+recipient's name; one of the WhatsApp samples carries a phone number. If there
+is nowhere to put a phone number, one cannot reach Turso — and a free-text
+"why I declined" would quote it straight back. `tests/test_extract.py` asserts
+the exact field set, so widening it is a conscious act.
+
+**Refusal is a feature, not a failure.** A caption reading "the first time was
+so nice, we had to do it twice / this sunday! / -/600 per person" must produce
+nothing. `to_event` re-checks rather than trusting the model: `is_event: true`
+with no date still yields None, because `Event.starts_at` is required and a
+digest grouped by day cannot hold an undated listing.
+
+What the real samples forced, each from a message that actually arrived:
+
+- **`Event.url` is now optional.** Two of three WhatsApp samples have no link
+  at all — "DM us", or a phone number. `render` omits the line rather than
+  printing `None`.
+- **`Event.source_ref` decides identity when the URL does not.** It defaults to
+  the URL, so every existing source keeps the ids it already has. A forwarded
+  message hashes its own body: the earlier plan of using the organiser's page
+  would have collapsed everything one organiser ever sends into a single row,
+  because the store upserts by id. Instagram uses the per-post `og:url`, which
+  is unique for the same reason.
+- **One message can list several cities.** The film-society sample runs in
+  Lahore, Islamabad and Karachi on two dates; the prompt takes the Islamabad
+  occurrence only. A message describing two *distinct* Islamabad events would
+  still yield one — a known limit, not yet worth a list return type.
+- **`starts_at` is the earliest time an attendee is expected.** The same sample
+  gives doors 6:00, film 6:30 and doors *closed* 6:25. The headline start sends
+  someone to a door that shut five minutes earlier.
+- **Prices vary by channel, not just by tier.** "PKR 1,500 online | PKR 2,000
+  on-spot" is not a range; the prompt asks for both, briefly.
+
+`source_ref` is a column added outside the `.sql` migrations, in
+`Store.ADDED_COLUMNS`. `_migrate()` replays every file on every `open()` and
+`ALTER TABLE ... ADD COLUMN` is not idempotent, so the column is added only
+when `PRAGMA table_info` says it is missing. Note `.fetchall()` there: a libSQL
+cursor is not iterable, which the dual-backend store tests caught.
+
+**Caveat, and it is a real one: no model output has ever been seen.** There is
+no `ANTHROPIC_API_KEY` in the environment, `.env`, an `ant` profile, or the
+repo secrets. Every rule that lives in Python is tested against real captured
+listings; the prompt itself is untested. Given that this project has twice
+shipped something verified only in one environment, treat extraction quality as
+unproven until it has run for real.
 
 ## Dedup (M3)
 
