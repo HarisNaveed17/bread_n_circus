@@ -912,3 +912,132 @@ def test_a_missing_digest_events_table_falls_back_to_the_stored_week(
     raw, sig = _signed(_message_payload(text="what's on"))
     assert app.handle_event(raw, sig) == (200, "ok")
     assert DIGEST in sent[0][1]
+
+
+# -- curator intake ----------------------------------------------------------
+#
+# The allowlist is the only thing between a public WhatsApp number and a model
+# reading whatever a stranger sends. These pin it fail-closed.
+
+CURATOR = "923001234567"
+LISTING = "/insert Chess N' Jams, Saturday 12th September, 5-9pm, Leafy Brew"
+
+
+@pytest.fixture
+def intake(monkeypatch):
+    """Capture intake writes and control the pending count."""
+    saved = []
+    monkeypatch.setenv("CURATORS", CURATOR)
+    monkeypatch.setattr(store, "record_intake", lambda s, b, **kw: saved.append((s, b)) or "id1")
+    monkeypatch.setattr(store, "pending_intake", lambda: len(saved))
+    monkeypatch.setattr(app.dispatch, "should_fire", lambda pending: False)
+    return saved
+
+
+def test_a_curator_can_submit_a_listing(sent, stored_digest, intake):
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1
+    assert intake[0][0] == CURATOR
+    # The prefix is stripped; the model gets the listing, not the command.
+    assert intake[0][1].startswith("Chess N' Jams")
+    assert "Saved" in sent[0][1]
+
+
+def test_a_stranger_gets_the_ordinary_reply_and_stores_nothing(sent, stored_digest, intake):
+    """Fail closed, and silently.
+
+    Answering "you are not authorised" would teach a stranger that /insert does
+    something. They get exactly what any other message gets.
+    """
+    raw, sig = _signed(_message_payload(text=LISTING, sender="923009999999"))
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert sent[0][1] == f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"
+
+
+def test_an_unset_allowlist_means_nobody(sent, stored_digest, intake, monkeypatch):
+    """An unset CURATORS must not mean "everyone"."""
+    monkeypatch.delenv("CURATORS")
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == []
+
+
+def test_insert_with_no_text_asks_for_some(sent, stored_digest, intake):
+    raw, sig = _signed(_message_payload(text="/insert", sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert sent == [(CURATOR, app.INSERT_EMPTY)]
+
+
+def test_a_failed_write_tells_the_curator(sent, stored_digest, intake, monkeypatch):
+    """Silently losing a forwarded listing is the worst outcome here."""
+
+    def boom(sender, body, **kw):
+        raise RuntimeError("turso down")
+
+    monkeypatch.setattr(store, "record_intake", boom)
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    assert app.handle_event(raw, sig) == (200, "ok")
+    assert sent == [(CURATOR, app.INSERT_FAILED)]
+
+
+def test_a_curator_can_still_ask_what_is_on(sent, stored_digest, intake):
+    """Curators are readers too; only the keyword routes to intake."""
+    raw, sig = _signed(_message_payload(text="what's on", sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert UPCOMING_REPLY in sent[0][1]
+
+
+def test_the_digest_run_fires_once_the_threshold_is_reached(
+    sent, stored_digest, intake, monkeypatch
+):
+    fired = []
+    monkeypatch.setattr(app.dispatch, "should_fire", lambda pending: pending >= 5)
+    monkeypatch.setattr(app.dispatch, "fire", lambda: fired.append(True) or True)
+    for n in range(5):
+        raw, sig = _signed(_message_payload(text=f"{LISTING} {n}", sender=CURATOR))
+        app.handle_event(raw, sig)
+    assert len(fired) == 1, "should fire exactly once, on the fifth"
+    assert "updating the listings now" in sent[-1][1]
+    assert "Saved" in sent[0][1] and "updating" not in sent[0][1]
+
+
+def test_a_failed_dispatch_still_confirms_the_save(sent, stored_digest, intake, monkeypatch):
+    """Triggering early is a nicety; the listing is saved either way."""
+    monkeypatch.setattr(app.dispatch, "should_fire", lambda pending: True)
+    monkeypatch.setattr(app.dispatch, "fire", lambda: False)
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1
+    assert "Saved" in sent[0][1]
+
+
+# -- the dispatch guard ------------------------------------------------------
+
+
+def test_dispatch_is_inert_without_configuration(monkeypatch):
+    """No token means intake still works; listings just wait for the schedule."""
+    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPO", raising=False)
+    assert app.dispatch.configured() is False
+    assert app.dispatch.should_fire(99) is False
+
+
+def test_dispatch_needs_the_threshold(monkeypatch):
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
+    monkeypatch.setenv("GITHUB_REPO", "o/r")
+    monkeypatch.setattr(app.dispatch, "_last_fired", 0.0)
+    assert app.dispatch.should_fire(4, now=10_000) is False
+    assert app.dispatch.should_fire(5, now=10_000) is True
+
+
+def test_dispatch_respects_the_cooldown(monkeypatch):
+    """A webhook can be delivered twice, and curators can cross."""
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
+    monkeypatch.setenv("GITHUB_REPO", "o/r")
+    monkeypatch.setattr(app.dispatch, "_last_fired", 10_000.0)
+    assert app.dispatch.should_fire(9, now=10_000 + 60) is False
+    assert app.dispatch.should_fire(9, now=10_000 + app.dispatch.COOLDOWN_SECONDS) is True

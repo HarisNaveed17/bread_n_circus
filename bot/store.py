@@ -7,6 +7,7 @@ API needs nothing but `httpx`.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -130,6 +131,43 @@ def events_between(start: date, end: date) -> list[tuple[str, str, str]]:
 def day_events(day: date) -> list[tuple[str, str]]:
     """`(day_label, block)` for everything on one day, in start order."""
     return [(label, block) for _, label, block in events_between(day, day)]
+
+
+# -- intake ------------------------------------------------------------------
+#
+# The bot is the only writer here, as with `subscribers`. It stores the text and
+# stops: extraction needs an LLM client, and the whole reason this function is
+# `httpx`-only is to keep one out of it. `isb_events/intake.py` reads these back.
+
+RECORD_INTAKE_SQL = """
+INSERT INTO intake (id, channel, sender, body, received_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(id) DO NOTHING
+"""
+
+PENDING_INTAKE_SQL = "SELECT COUNT(*) FROM intake WHERE processed_at IS NULL"
+
+
+def intake_id(body: str) -> str:
+    """Hash of the body, so the same listing forwarded twice is one row."""
+    return hashlib.sha256(body.strip().encode()).hexdigest()[:32]
+
+
+def record_intake(sender: str, body: str, *, channel: str = "whatsapp") -> str:
+    """Queue a forwarded listing. Returns its id.
+
+    `ON CONFLICT DO NOTHING`, so a re-forward is silently the same row — two
+    curators sending the same post must not produce two events.
+    """
+    row_id = intake_id(body)
+    query(RECORD_INTAKE_SQL, [row_id, channel, sender, body.strip(), _now()])
+    return row_id
+
+
+def pending_intake() -> int:
+    """How many forwarded listings the pipeline has not looked at yet."""
+    rows = query(PENDING_INTAKE_SQL)
+    return int(rows[0][0] or 0) if rows else 0
 
 
 # -- subscribers -------------------------------------------------------------

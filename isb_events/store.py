@@ -63,11 +63,64 @@ class Store:
     # column name" the second time. Asking the table what it already has is.
     ADDED_COLUMNS = {"events": {"source_ref": "TEXT", "contact_phone": "TEXT"}}
 
+    # Columns whose NOT NULL has been dropped since `001_init.sql` was written.
+    # `events.url` became optional when forwarded listings arrived: two of three
+    # real WhatsApp samples have no link at all, saying "DM us" or giving a
+    # phone number.
+    RELAXED_COLUMNS = {"events": {"url"}}
+
     def _migrate(self) -> None:
         for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
             self._conn.executescript(sql_file.read_text())
         self._add_missing_columns()
+        self._relax_not_null()
         self._conn.commit()
+
+    def _relax_not_null(self) -> None:
+        """Drop a NOT NULL that `001_init.sql` still declares.
+
+        SQLite cannot `ALTER COLUMN`, so the only way is to rebuild the table.
+        That is done from `PRAGMA table_info` rather than a hardcoded schema, so
+        columns added later (`source_ref`, `contact_phone`) survive without this
+        needing to know about them.
+
+        Guarded by the check, so it happens once and is a no-op on every later
+        `open()` — the same idempotency constraint as everything else here.
+        """
+        for table, columns in self.RELAXED_COLUMNS.items():
+            info = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if not any(row[1] in columns and row[3] for row in info):
+                continue  # already relaxed, or the table is not there yet
+
+            log.info("store: relaxing NOT NULL on %s.%s", table, ", ".join(sorted(columns)))
+            defs, names = [], []
+            for _, name, decl, notnull, default, pk in info:
+                parts = [name, decl or "TEXT"]
+                if pk:
+                    parts.append("PRIMARY KEY")
+                if notnull and name not in columns:
+                    parts.append("NOT NULL")
+                if default is not None:
+                    parts.append(f"DEFAULT {default}")
+                defs.append(" ".join(parts))
+                names.append(name)
+
+            joined = ", ".join(names)
+            self._conn.execute(f"CREATE TABLE {table}_rebuild ({', '.join(defs)})")
+            self._conn.execute(
+                f"INSERT INTO {table}_rebuild ({joined}) SELECT {joined} FROM {table}"
+            )
+            self._conn.execute(f"DROP TABLE {table}")
+            self._conn.execute(f"ALTER TABLE {table}_rebuild RENAME TO {table}")
+            self._conn.commit()
+            # The rebuild drops the table's indexes with it; `_migrate` replays
+            # the CREATE INDEX IF NOT EXISTS statements on the next open, but
+            # this run would otherwise be left without them.
+            for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                for statement in sql_file.read_text().split(";"):
+                    if "CREATE INDEX" in statement.upper():
+                        self._conn.execute(statement)
+            self._conn.commit()
 
     def _add_missing_columns(self) -> None:
         for table, columns in self.ADDED_COLUMNS.items():
@@ -257,6 +310,56 @@ class Store:
             (_now_iso(), week_of.isoformat()),
         )
         self._conn.commit()
+
+    # -- intake ---------------------------------------------------------------
+    #
+    # Read-only on this side, mirroring `subscribers`: the bot is the sole
+    # writer (`bot/store.py`), the pipeline the sole processor.
+
+    INTAKE_COLUMNS = "id, channel, sender, body, received_at"
+
+    def pending_intake(self, limit: int = 25) -> list[dict]:
+        """Queued listings, oldest first. `processed_at IS NULL` is the queue."""
+        rows = self._conn.execute(
+            f"SELECT {self.INTAKE_COLUMNS} FROM intake "
+            "WHERE processed_at IS NULL ORDER BY received_at LIMIT ?",
+            (limit,),
+        ).fetchall()
+        names = self.INTAKE_COLUMNS.split(", ")
+        return [dict(zip(names, row, strict=True)) for row in rows]
+
+    def mark_intake_processed(
+        self, intake_id: str, *, event_id: str | None = None, decline_reason: str | None = None
+    ) -> None:
+        """Take a row out of the queue, whether or not it became an event.
+
+        Leaving a declined row pending would retry it every run forever and keep
+        the pending count above the bot's dispatch threshold, firing a pipeline
+        run on every curator message.
+        """
+        self._conn.execute(
+            "UPDATE intake SET processed_at = ?, event_id = ?, decline_reason = ? WHERE id = ?",
+            (_now_iso(), event_id, decline_reason, intake_id),
+        )
+        self._conn.commit()
+
+    def intake_counts(self) -> dict[str, int]:
+        """Pending / extracted / declined, for the run summary."""
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN processed_at IS NULL THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN event_id IS NOT NULL THEN 1 ELSE 0 END)
+            FROM intake
+            """
+        ).fetchone()
+        total, pending, extracted = (row[0] or 0), (row[1] or 0), (row[2] or 0)
+        return {
+            "total": total,
+            "pending": pending,
+            "extracted": extracted,
+            "declined": total - pending - extracted,
+        }
 
     # -- subscribers ----------------------------------------------------------
     #

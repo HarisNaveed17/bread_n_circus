@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 
-from . import intent, store, whatsapp
+from . import dispatch, intent, store, whatsapp
 from .store import KARACHI
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,21 @@ NOTHING_UPCOMING = (
 # not be silently unsubscribed.
 OPT_OUT_WORDS = {"stop", "unsubscribe", "stop promotions", "cancel"}
 OPT_IN_WORDS = {"subscribe", "start", "join"}
+
+# Curators forward listings with this prefix. A keyword rather than "anything
+# from a curator", because curators also just ask what's on.
+INSERT_PREFIX = "/insert"
+
+INSERT_SAVED = (
+    "Saved — I'll pull the details out of that and it'll show up in the listings. "
+    "{pending} waiting to be processed."
+)
+INSERT_SOON = "Saved — that's {pending}, so I'm updating the listings now. Give it a few minutes."
+INSERT_EMPTY = "Send the listing text after /insert and I'll add it."
+INSERT_FAILED = "Couldn't save that one — try again in a minute."
+# Deliberately identical to what a stranger gets for any other message: the
+# reply must not reveal that /insert means anything, or that an allowlist
+# exists. An unknown sender simply gets the digest, as before.
 
 
 def handle_verify(params: dict[str, str]) -> tuple[int, str]:
@@ -111,6 +126,15 @@ def handle_health(token: str | None) -> tuple[int, str]:
         lines.append(f"subscribers: MISSING — {exc}")
         lines.append("            run the pipeline against this database once")
         lines.append("            (`gh workflow run weekly-digest.yml`) to migrate")
+
+    curators = len(_curators())
+    lines.append(f"curators  : {curators or 'NONE — /insert is closed to everyone'}")
+    lines.append(f"dispatch  : {'configured' if dispatch.configured() else 'off (schedule only)'}")
+    try:
+        rows = store.query("SELECT COUNT(*) FROM intake WHERE processed_at IS NULL")
+        lines.append(f"intake    : table present — {rows[0][0]} pending")
+    except Exception as exc:
+        lines.append(f"intake    : MISSING — {exc}")
 
     # Same story for the day views: without this table "what's on today" quietly
     # falls back to the whole week, which looks like a parsing bug from a phone.
@@ -170,7 +194,12 @@ def _handle_message(message: dict) -> None:
     except Exception:
         log.exception("bot: could not record contact for %s", sender)
 
-    word = _body_text(message).strip().lower()
+    body = _body_text(message)
+    word = body.strip().lower()
+
+    if word.startswith(INSERT_PREFIX):
+        _handle_insert(sender, body)
+        return
 
     if word in OPT_OUT_WORDS:
         store.opt_out(sender)
@@ -184,6 +213,49 @@ def _handle_message(message: dict) -> None:
         return
 
     _reply(sender, intent.parse(_body_text(message), today=_today()))
+
+
+def _curators() -> set[str]:
+    """wa_ids allowed to submit listings, from `CURATORS`, comma-separated.
+
+    **Not optional.** Without it the bot's number is an open pipe into the
+    digest and, worse, into a model — the bodies are untrusted text. Unset
+    means nobody is a curator, which fails closed.
+    """
+    raw = os.environ.get("CURATORS", "")
+    return {c.strip() for c in raw.split(",") if c.strip()}
+
+
+def _handle_insert(sender: str, body: str) -> None:
+    """A curator forwarding a listing. Store it; the pipeline parses it later.
+
+    A non-curator gets the ordinary reply and nothing is stored. That is
+    deliberately indistinguishable from any other message — telling a stranger
+    "you are not authorised" teaches them that `/insert` does something.
+    """
+    if sender not in _curators():
+        log.info("bot: /insert from a non-curator %s; treating as a normal message", sender)
+        _send_upcoming(sender)
+        return
+
+    listing = body.strip()[len(INSERT_PREFIX) :].strip()
+    if not listing:
+        whatsapp.send_text(sender, INSERT_EMPTY)
+        return
+
+    try:
+        store.record_intake(sender, listing)
+        pending = store.pending_intake()
+    except Exception:
+        log.exception("bot: could not queue a listing from %s", sender)
+        whatsapp.send_text(sender, INSERT_FAILED)
+        return
+
+    log.info("bot: queued a listing from %s; %d pending", sender, pending)
+    if dispatch.should_fire(pending) and dispatch.fire():
+        whatsapp.send_text(sender, INSERT_SOON.format(pending=pending))
+        return
+    whatsapp.send_text(sender, INSERT_SAVED.format(pending=pending))
 
 
 def _today() -> date:

@@ -225,3 +225,100 @@ def test_events_in_window_handles_optional_fields_left_null(store):
     store.upsert_event(_event(venue=None, ends_at=None))
     (found,) = store.events_in_window(DigestWindow.week_of(date(2026, 9, 7)))
     assert found.venue is None and found.ends_at is None
+
+
+# -- the intake queue ---------------------------------------------------------
+
+
+def _queue(store, body="a listing", sender="923001234567", intake_id="i1"):
+    store._conn.execute(
+        "INSERT INTO intake (id, channel, sender, body, received_at) VALUES (?,?,?,?,?)",
+        (intake_id, "whatsapp", sender, body, "2026-09-17T12:00:00+05:00"),
+    )
+    store._conn.commit()
+
+
+def test_pending_intake_returns_queued_rows_oldest_first(store):
+    _queue(store, "second", intake_id="b")
+    store._conn.execute(
+        "UPDATE intake SET received_at = ? WHERE id = 'b'", ("2026-09-17T13:00:00+05:00",)
+    )
+    _queue(store, "first", intake_id="a")
+    store._conn.commit()
+    assert [r["body"] for r in store.pending_intake()] == ["first", "second"]
+
+
+def test_a_processed_row_leaves_the_queue(store):
+    """A declined listing must not be retried forever.
+
+    Left pending it would be re-extracted every run, re-paying for the same
+    refusal and holding the pending count above the bot's dispatch threshold —
+    which fires a pipeline run on every curator message.
+    """
+    _queue(store)
+    store.mark_intake_processed("i1", decline_reason="declined")
+    assert store.pending_intake() == []
+    assert store.intake_counts() == {"total": 1, "pending": 0, "extracted": 0, "declined": 1}
+
+
+def test_an_extracted_row_records_what_it_became(store):
+    _queue(store)
+    store.mark_intake_processed("i1", event_id="abc123")
+    assert store.intake_counts()["extracted"] == 1
+    row = store._conn.execute("SELECT event_id, processed_at FROM intake").fetchone()
+    assert row[0] == "abc123" and row[1]
+
+
+def test_pending_intake_respects_its_limit(store):
+    for n in range(5):
+        _queue(store, f"listing {n}", intake_id=f"i{n}")
+    assert len(store.pending_intake(limit=2)) == 2
+
+
+def test_intake_counts_on_an_empty_table(store):
+    assert store.intake_counts() == {"total": 0, "pending": 0, "extracted": 0, "declined": 0}
+
+
+# -- the events.url NOT NULL, dropped after the fact ---------------------------
+
+
+def test_an_event_with_no_url_can_be_stored(store):
+    """`001_init.sql` declared url NOT NULL; forwarded listings often have none.
+
+    Two of three real WhatsApp samples say "DM us" or give a phone number, so
+    without the rebuild the whole intake path fails at the first insert.
+    """
+    store.upsert_event(_event(url=None, source_ref="wa:abc123"))
+    (found,) = store.events_in_window(DigestWindow.week_of(date(2026, 9, 7)))
+    assert found.url is None
+    assert found.source_ref == "wa:abc123"
+
+
+def test_the_rebuild_keeps_existing_rows_and_columns(store):
+    """The rebuild runs on a table that already has data and added columns."""
+    store.upsert_event(_event(category="music", contact_phone="0303 5667670"))
+    store._relax_not_null()  # idempotent: should be a no-op the second time
+    (found,) = store.events_in_window(DigestWindow.week_of(date(2026, 9, 7)))
+    assert found.title == "Kaavish Live"
+    assert found.category == "music"
+    assert found.contact_phone == "0303 5667670"
+
+
+def test_the_rebuild_leaves_the_indexes_in_place(store):
+    store._relax_not_null()
+    names = {
+        r[0]
+        for r in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'"
+        ).fetchall()
+    }
+    assert "idx_events_starts_at" in names
+
+
+def test_other_not_nulls_survive_the_rebuild(store):
+    """Only `url` is relaxed — `title` must still be required."""
+    info = store._conn.execute("PRAGMA table_info(events)").fetchall()
+    notnull = {row[1]: row[3] for row in info}
+    assert not notnull["url"]
+    assert notnull["title"]
+    assert notnull["starts_at"]

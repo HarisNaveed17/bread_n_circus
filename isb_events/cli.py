@@ -12,6 +12,7 @@ from datetime import date
 
 import typer
 
+from .intake import drain
 from .models import DigestWindow, Event
 from .normalize import dedupe
 from .notify.base import DryRunNotifier, Notifier
@@ -53,6 +54,25 @@ def _windows(week_of: str | None) -> list[DigestWindow]:
 
 def _week_start(window: DigestWindow) -> date:
     return window.start.date()
+
+
+def _drain_intake(store: Store) -> None:
+    """Turn forwarded listings into events before rendering anything.
+
+    Before the windows, not inside them: a listing can land in either week, and
+    extracting once per window would pay twice for the same text.
+
+    A failure here must not cost the digest. Intake is additive — the scraped
+    sources are the bulk of it — so a missing API key or a model outage should
+    mean "no new forwarded events this run", not "no digest".
+    """
+    try:
+        created = drain(store)
+    except Exception:
+        logging.getLogger(__name__).exception("intake failed; rendering without it")
+        return
+    if created:
+        typer.echo(f"intake: {len(created)} forwarded listing(s) became events")
 
 
 def _events_for(window: DigestWindow, store: Store, result) -> list[Event]:
@@ -118,6 +138,7 @@ def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
     With no `--week-of`, refreshes both the current week and the coming one.
     """
     with Store.open() as store:
+        _drain_intake(store)
         for window in _windows(week_of):
             result = run_fetch(window, store)
             events = _events_for(window, store, result)
@@ -160,6 +181,7 @@ def run(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
     window = _window(week_of)
     week_start = _week_start(window)
     with Store.open() as store:
+        _drain_intake(store)
         result = run_fetch(window, store)
         events = _events_for(window, store, result)
         messages = render_events(events, window)
