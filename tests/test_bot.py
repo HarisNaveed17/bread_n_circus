@@ -342,7 +342,9 @@ def test_stop_matching_is_exact_not_substring(sent, stored_digest, writes):
     raw, sig = _signed(_message_payload(text="tell me about Stop Commenting on My Body"))
     app.handle_event(raw, sig)
     assert [name for name, _ in writes] == ["record_contact"]
-    assert [body for _, body in sent] == _upcoming()
+    # Not an opt-out, and no longer the whole digest either — it asks nothing
+    # the bot recognises, so it gets the "didn't catch that" reply.
+    assert [body for _, body in sent] == [app.NOT_UNDERSTOOD]
 
 
 def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, monkeypatch):
@@ -355,7 +357,7 @@ def test_a_failed_contact_write_does_not_cost_the_reply(sent, stored_digest, mon
     assert [body for _, body in sent] == _upcoming()
 
 
-def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
+def test_non_text_messages_are_not_understood(sent, stored_digest, writes):
     payload = _message_payload()
     payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
         "id": "wamid.IMG",
@@ -365,7 +367,8 @@ def test_non_text_messages_still_get_the_digest(sent, stored_digest, writes):
     }
     raw, sig = _signed(payload)
     app.handle_event(raw, sig)
-    assert [body for _, body in sent] == _upcoming()
+    # A sticker or photo asks nothing. Flyer intake is not built yet.
+    assert [body for _, body in sent] == [app.NOT_UNDERSTOOD]
 
 
 # -- the send endpoint -------------------------------------------------------
@@ -663,14 +666,20 @@ def test_tomorrow_is_recognised(text):
     assert (wanted.kind, wanted.day, wanted.label) == (intent.DAY, date(2026, 9, 2), "tomorrow")
 
 
-@pytest.mark.parametrize("text", ["what's on this week", "hi", "", "events"])
-def test_everything_else_is_the_week(text):
+@pytest.mark.parametrize("text", ["what's on this week", "whats on", "events", "week", "upcoming"])
+def test_the_week_phrases_are_recognised(text):
     assert intent.parse(text, today=TODAY) == intent.WEEK_FILTER
+
+
+@pytest.mark.parametrize("text", ["hi", "", "thanks!", "is this the pizza place", "ok"])
+def test_anything_unrecognised_is_not_the_week(text):
+    """The bot used to answer every message with fifteen events."""
+    assert intent.parse(text, today=TODAY).kind == intent.UNKNOWN
 
 
 def test_a_day_word_has_to_stand_alone():
     """'Tomorrowland' is a plausible event title; it must not narrow the digest."""
-    assert intent.parse("tickets for Tomorrowland?", today=TODAY) == intent.WEEK_FILTER
+    assert intent.parse("tickets for Tomorrowland?", today=TODAY).kind == intent.UNKNOWN
 
 
 def test_tomorrow_wins_over_today_when_both_appear():
@@ -953,7 +962,10 @@ def test_a_stranger_gets_the_ordinary_reply_and_stores_nothing(sent, stored_dige
     raw, sig = _signed(_message_payload(text=LISTING, sender="923009999999"))
     app.handle_event(raw, sig)
     assert intake == []
-    assert sent[0][1] == f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"
+    # Whatever any other sender would get for the same words — here, a listing
+    # asks nothing, so it is the "didn't catch that" reply. The point is that
+    # it reveals nothing about /insert.
+    assert sent[0][1] == app.NOT_UNDERSTOOD
 
 
 def test_an_unset_allowlist_means_nobody(sent, stored_digest, intake, monkeypatch):
@@ -1068,24 +1080,69 @@ def test_a_partial_number_is_not_a_match(sent, stored_digest, intake, monkeypatc
     assert intake == []
 
 
-def test_the_shape_log_never_carries_content(caplog):
-    """Diagnostic logging must not turn into a transcript of strangers' texts.
+# -- a curator's forward is the submission -----------------------------------
+#
+# WhatsApp gives you no way to add a prefix to a forwarded message, so the
+# gesture a curator reaches for first could not work. Meta marks forwards with
+# `context.forwarded` and omits `context` entirely otherwise — confirmed
+# against a real forward in production on 2026-09-17.
 
-    `context` also names the *original* sender — a third party who never
-    messaged us — so its keys are logged and its values are not.
+
+def _forwarded_payload(text, sender=CURATOR):
+    payload = _message_payload(text=text, sender=sender)
+    payload["entry"][0]["changes"][0]["value"]["messages"][0]["context"] = {"forwarded": True}
+    return payload
+
+
+def test_a_curator_forward_is_queued_without_any_keyword(sent, stored_digest, intake):
+    raw, sig = _signed(_forwarded_payload("Open Mic tonight at 8pm, The Black Hole"))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1
+    assert intake[0][1] == "Open Mic tonight at 8pm, The Black Hole"
+    assert "Saved" in sent[0][1]
+
+
+def test_a_forward_beats_the_day_words_inside_it(sent, stored_digest, intake):
+    """A listing saying "tonight" must be stored, not answered as a day query.
+
+    The forward check runs before intent parsing for exactly this reason.
     """
-    import logging
+    raw, sig = _signed(_forwarded_payload("Gig tonight, 9pm"))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1
 
-    message = {
-        "from": "923001234567",
-        "type": "text",
-        "text": {"body": "SECRET BODY TEXT"},
-        "context": {"forwarded": True, "from": "923009999999", "id": "wamid.ORIGINAL"},
+
+def test_a_stranger_forward_is_not_queued(sent, stored_digest, intake):
+    raw, sig = _signed(_forwarded_payload("Open Mic tonight at 8pm", sender="923009999999"))
+    app.handle_event(raw, sig)
+    assert intake == []
+
+
+def test_a_curators_own_typing_is_still_a_question(sent, stored_digest, intake):
+    """Only forwards bypass the keyword; a curator can still ask what's on."""
+    raw, sig = _signed(_message_payload(text="what's on", sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert UPCOMING_REPLY in sent[0][1]
+
+
+def test_a_forwarded_photo_says_it_cannot_read_it(sent, stored_digest, intake):
+    """Flyer intake needs media download at receipt; it is not built."""
+    payload = _forwarded_payload("")
+    payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
+        "id": "wamid.IMG",
+        "from": CURATOR,
+        "type": "image",
+        "image": {"id": "media-id"},
+        "context": {"forwarded": True},
     }
-    with caplog.at_level(logging.INFO):
-        app._log_shape(message)
-    logged = caplog.text
-    assert "SECRET BODY TEXT" not in logged
-    assert "923009999999" not in logged, "the original sender's number must not be logged"
-    assert "wamid.ORIGINAL" not in logged
-    assert "forwarded=True" in logged
+    raw, sig = _signed(payload)
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert sent == [(CURATOR, app.INSERT_NO_TEXT)]
+
+
+def test_a_message_with_no_context_is_not_a_forward():
+    assert app._is_forwarded({"type": "text"}) is False
+    assert app._is_forwarded({"type": "text", "context": {}}) is False
+    assert app._is_forwarded({"type": "text", "context": {"forwarded": True}}) is True

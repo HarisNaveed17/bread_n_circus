@@ -22,8 +22,17 @@ from datetime import date, timedelta
 TODAY_WORDS = frozenset({"today", "tonight"})
 TOMORROW_WORDS = frozenset({"tomorrow", "tmrw", "tmr"})
 
+# Asking for the week. A single word is enough when it is unambiguous; the
+# phrases cover the ways people actually ask, since "what's on" tokenises into
+# nothing useful on its own.
+WEEK_WORDS = frozenset({"week", "events", "upcoming", "listings", "lineup"})
+WEEK_PHRASES = ("whats on", "what is on", "whats happening", "anything on", "what s on")
+
 WEEK = "week"
 DAY = "day"
+# Recognised nothing. The bot used to answer *any* message with the whole
+# digest, which meant a wrong number or a "thanks!" got fifteen events back.
+UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -38,19 +47,37 @@ class Filter:
 
 
 WEEK_FILTER = Filter(WEEK)
+UNKNOWN_FILTER = Filter(UNKNOWN, label="that")
+
+
+def _normalise(text: str) -> str:
+    """Lowercase, apostrophes dropped, everything else to spaces.
+
+    So "What's on?" and "whats on" are one thing, and a phrase can be matched
+    as a substring without punctuation getting in the way.
+    """
+    lowered = text.lower().replace("'", "").replace("\u2019", "")
+    return " ".join(re.findall(r"[a-z0-9]+", lowered))
 
 
 def parse(text: str, *, today: date) -> Filter:
-    """Anything unrecognised is the week — the reply that was always the default.
+    """What was asked for, or `UNKNOWN`.
 
-    Tokenised rather than substring-matched so a day word has to stand alone:
+    **Unrecognised is no longer the week.** Answering every message with the
+    whole digest meant a wrong number, a "thanks!", or a forwarded chain letter
+    all got fifteen events back — which reads as a bot that is not listening.
+
+    Day words are matched as whole tokens so they have to stand alone:
     "Tomorrowland" is a plausible event title and must not silently narrow the
-    digest to one day. Tomorrow is checked first so "not today, tomorrow" lands
-    where the sender meant.
+    digest to one day. Tomorrow is checked before today so "not today,
+    tomorrow" lands where the sender meant.
     """
-    words = set(re.findall(r"[a-z]+", text.lower()))
+    normalised = _normalise(text)
+    words = set(normalised.split())
     if words & TOMORROW_WORDS:
         return Filter(DAY, today + timedelta(days=1), "tomorrow")
     if words & TODAY_WORDS:
         return Filter(DAY, today, "today")
-    return WEEK_FILTER
+    if words & WEEK_WORDS or any(phrase in normalised for phrase in WEEK_PHRASES):
+        return WEEK_FILTER
+    return UNKNOWN_FILTER

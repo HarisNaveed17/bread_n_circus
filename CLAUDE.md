@@ -243,6 +243,41 @@ curator ──"/insert …"──> webhook ──> intake (queued)
                           pipeline: drain ──> extract ──> events ──> digest
 ```
 
+**A curator's forward *is* the submission — no keyword.** WhatsApp gives you
+no way to add a prefix to a forwarded message, so `/insert` could never ride
+along with the gesture people actually reach for. Confirmed against a real
+forward in production, 2026-09-17:
+
+```
+bot: shape type=text
+     keys=['context', 'from', 'from_user_id', 'id', 'text', 'timestamp', 'type']
+     context_keys=['forwarded']  forwarded=True  frequently=None
+```
+
+Three things in that payload worth keeping:
+
+- `context` is **absent entirely** on a normal message, so the signal is
+  unambiguous in both directions — no need to distinguish false from missing.
+- `context_keys` is `['forwarded']` **only**. A plain forward does not leak the
+  original sender's number. (A *reply* would: there `context` carries the
+  quoted message's id and author.)
+- `frequently_forwarded` is **absent, not false** — test truthiness. It is also
+  a useful signal in its own right: a heavily-circulated chain message is
+  exactly what you would not want ingested.
+
+The forward check runs *before* intent parsing, because a listing that says
+"tonight" would otherwise be answered as a day query instead of stored.
+`/insert` stays for pasted text.
+
+**The bot no longer answers every message with the digest.** It used to, which
+meant a wrong number, a "thanks!", or a forwarded chain letter all got fifteen
+events back. `intent.parse` returns `UNKNOWN` for anything that is not a
+recognised day or week phrase, and that gets a short "didn't catch that" reply
+naming what to text instead. The cost is that a real question the word list
+does not cover — "anything free on Friday?" — now gets the fallback rather than
+the digest; widening `WEEK_WORDS` is the lever, and Phase 3 Q&A is the real
+answer.
+
 **The allowlist is the security boundary, and it fails closed.** `CURATORS` is
 a comma-separated list of wa_ids; unset means nobody. Without it the number is
 an open pipe into the digest *and* into a model, on a public WhatsApp number. A

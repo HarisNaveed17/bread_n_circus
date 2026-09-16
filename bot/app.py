@@ -68,6 +68,17 @@ INSERT_SAVED = (
 )
 INSERT_SOON = "Saved — that's {pending}, so I'm updating the listings now. Give it a few minutes."
 INSERT_EMPTY = "Send the listing text after /insert and I'll add it."
+# A forwarded photo is the obvious next thing a curator will try. Flyer intake
+# needs the bot to download media bytes at receipt, because Meta's media URLs
+# expire long before the pipeline runs — so say so rather than failing quietly.
+INSERT_NO_TEXT = (
+    "I can only read text listings at the moment — a forwarded photo won't work yet. "
+    "Paste the details and I'll take them."
+)
+NOT_UNDERSTOOD = (
+    "Ooops, I don't know what you're trying to say there \U0001f440\n\n"
+    "Are you interested in what's on this week? Text *this week* if so!"
+)
 INSERT_FAILED = "Couldn't save that one — try again in a minute."
 # Deliberately identical to what a stranger gets for any other message: the
 # reply must not reveal that /insert means anything, or that an allowlist
@@ -184,33 +195,9 @@ def _body_text(message: dict) -> str:
     return (message.get("text") or {}).get("body") or ""
 
 
-def _log_shape(message: dict) -> None:
-    """Log a message's *shape*, never its content.
-
-    Answering one question: does Meta mark a forwarded message, and how? If it
-    does, a curator could simply forward a listing instead of retyping it with
-    a keyword, which is the gesture people actually reach for — WhatsApp gives
-    you no way to add a prefix to a forward.
-
-    Keys and booleans only. The bodies are strangers' messages and `context`
-    carries the *original* sender's number, which is a third party who never
-    messaged us — so its keys are logged, never its values.
-    """
-    context = message.get("context") or {}
-    log.info(
-        "bot: shape type=%s keys=%s context_keys=%s forwarded=%s frequently=%s",
-        message.get("type", "?"),
-        sorted(message.keys()),
-        sorted(context.keys()),
-        context.get("forwarded"),
-        context.get("frequently_forwarded"),
-    )
-
-
 def _handle_message(message: dict) -> None:
     sender = message["from"]
     log.info("bot: inbound %s message from %s", message.get("type", "?"), sender)
-    _log_shape(message)
 
     # Best-effort: a bookkeeping failure must never cost someone their reply.
     try:
@@ -221,8 +208,16 @@ def _handle_message(message: dict) -> None:
     body = _body_text(message)
     word = body.strip().lower()
 
+    # A forward carries `context.forwarded` and nothing else; a normal message
+    # has no `context` at all. Confirmed against a real forward on 2026-09-17 —
+    # see CLAUDE.md § Intake. WhatsApp gives you no way to add a prefix to a
+    # forward, so for a curator the forward *is* the submission.
+    if _is_forwarded(message) and _wa_id(sender) in _curators():
+        _handle_insert(sender, body.strip(), forwarded=True)
+        return
+
     if word.startswith(INSERT_PREFIX):
-        _handle_insert(sender, body)
+        _handle_insert(sender, body.strip()[len(INSERT_PREFIX) :].strip())
         return
 
     if word in OPT_OUT_WORDS:
@@ -261,21 +256,24 @@ def _curators() -> set[str]:
     return {_wa_id(c) for c in raw.split(",") if _wa_id(c)}
 
 
-def _handle_insert(sender: str, body: str) -> None:
-    """A curator forwarding a listing. Store it; the pipeline parses it later.
+def _is_forwarded(message: dict) -> bool:
+    return bool((message.get("context") or {}).get("forwarded"))
+
+
+def _handle_insert(sender: str, listing: str, *, forwarded: bool = False) -> None:
+    """A curator submitting a listing. Store it; the pipeline parses it later.
 
     A non-curator gets the ordinary reply and nothing is stored. That is
     deliberately indistinguishable from any other message — telling a stranger
     "you are not authorised" teaches them that `/insert` does something.
     """
     if _wa_id(sender) not in _curators():
-        log.info("bot: /insert from a non-curator %s; treating as a normal message", sender)
-        _send_upcoming(sender)
+        log.info("bot: submission from a non-curator %s; treating as a normal message", sender)
+        _reply(sender, intent.parse(listing, today=_today()))
         return
 
-    listing = body.strip()[len(INSERT_PREFIX) :].strip()
     if not listing:
-        whatsapp.send_text(sender, INSERT_EMPTY)
+        whatsapp.send_text(sender, INSERT_NO_TEXT if forwarded else INSERT_EMPTY)
         return
 
     try:
@@ -299,6 +297,10 @@ def _today() -> date:
 
 
 def _reply(to: str, wanted: intent.Filter) -> None:
+    if wanted.kind == intent.UNKNOWN:
+        log.info("bot: nothing recognised in a message from %s", to)
+        whatsapp.send_text(to, NOT_UNDERSTOOD)
+        return
     if wanted.kind == intent.WEEK:
         _send_upcoming(to)
         return
