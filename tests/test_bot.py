@@ -1041,3 +1041,28 @@ def test_dispatch_respects_the_cooldown(monkeypatch):
     monkeypatch.setattr(app.dispatch, "_last_fired", 10_000.0)
     assert app.dispatch.should_fire(9, now=10_000 + 60) is False
     assert app.dispatch.should_fire(9, now=10_000 + app.dispatch.COOLDOWN_SECONDS) is True
+
+
+@pytest.mark.parametrize(
+    "configured",
+    ["923001234567", "+923001234567", "+92 300 1234567", "92-300-1234567", " 923001234567 "],
+)
+def test_a_curator_number_is_matched_however_it_is_written(
+    sent, stored_digest, intake, monkeypatch, configured
+):
+    """Meta's `from` is digits only; a `+` or spaces in CURATORS must still work.
+
+    The failure is otherwise silent — the number never matches and /insert
+    behaves as if the curator were a stranger, which looks like a broken bot.
+    """
+    monkeypatch.setenv("CURATORS", configured)
+    raw, sig = _signed(_message_payload(text=LISTING, sender="923001234567"))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1, f"CURATORS={configured!r} did not match"
+
+
+def test_a_partial_number_is_not_a_match(sent, stored_digest, intake, monkeypatch):
+    monkeypatch.setenv("CURATORS", "1234567")
+    raw, sig = _signed(_message_payload(text=LISTING, sender="923001234567"))
+    app.handle_event(raw, sig)
+    assert intake == []

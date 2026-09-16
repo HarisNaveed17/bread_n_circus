@@ -215,6 +215,17 @@ def _handle_message(message: dict) -> None:
     _reply(sender, intent.parse(_body_text(message), today=_today()))
 
 
+def _wa_id(number: str) -> str:
+    """Digits only, which is the form Meta puts in a message's `from` field.
+
+    Applied to the configured list as well as the incoming sender, so
+    `+92 300 1234567`, `92 300 1234567` and `923001234567` all mean the same
+    curator. Getting this wrong is otherwise silent — the number simply never
+    matches and `/insert` quietly behaves as if you were a stranger.
+    """
+    return "".join(c for c in number if c.isdigit())
+
+
 def _curators() -> set[str]:
     """wa_ids allowed to submit listings, from `CURATORS`, comma-separated.
 
@@ -223,7 +234,7 @@ def _curators() -> set[str]:
     means nobody is a curator, which fails closed.
     """
     raw = os.environ.get("CURATORS", "")
-    return {c.strip() for c in raw.split(",") if c.strip()}
+    return {_wa_id(c) for c in raw.split(",") if _wa_id(c)}
 
 
 def _handle_insert(sender: str, body: str) -> None:
@@ -233,7 +244,7 @@ def _handle_insert(sender: str, body: str) -> None:
     deliberately indistinguishable from any other message — telling a stranger
     "you are not authorised" teaches them that `/insert` does something.
     """
-    if sender not in _curators():
+    if _wa_id(sender) not in _curators():
         log.info("bot: /insert from a non-curator %s; treating as a normal message", sender)
         _send_upcoming(sender)
         return
