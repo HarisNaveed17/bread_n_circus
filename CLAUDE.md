@@ -232,9 +232,11 @@ events once and nothing after.
 
 ## Intake extraction
 
-Built 2026-09-14, **unverified against a live model** — see the caveat at the
-end. `extract.Listing` is the seam: Instagram and WhatsApp adapters build one,
-`extract()` turns it into an `Event` or declines.
+Built 2026-09-14, **verified against the live API 2026-09-17** — see
+[What the run showed](#what-the-live-run-showed). `extract.Listing` is the
+seam: Instagram and WhatsApp adapters build one, `extract()` turns it into an
+`Event` or declines. Runs on **Haiku 4.5**, for reasons measured rather than
+assumed.
 
 Runs in the pipeline, never the bot. `bot/` reaches Turso over HTTP with
 `httpx` alone so Vercel ships no compiled driver into the function; an LLM
@@ -293,12 +295,47 @@ What the real samples forced, each from a message that actually arrived:
 when `PRAGMA table_info` says it is missing. Note `.fetchall()` there: a libSQL
 cursor is not iterable, which the dual-backend store tests caught.
 
-**Caveat, and it is a real one: no model output has ever been seen.** There is
-no `ANTHROPIC_API_KEY` in the environment, `.env`, an `ant` profile, or the
-repo secrets. Every rule that lives in Python is tested against real captured
-listings; the prompt itself is untested. Given that this project has twice
-shipped something verified only in one environment, treat extraction quality as
-unproven until it has run for real.
+### What the live run showed
+
+All eight real listings, three models, 2026-09-17. Four things were learned,
+and three of them were bugs.
+
+**`thinking: adaptive` is not portable, and switching `MODEL` is not a one-line
+change.** It is a hard `400 invalid_request_error` on anything before 4.6 —
+Haiku 4.5 and Sonnet 4.5 both refused every call. `_thinking_kwargs` now sends
+it only to models that accept it.
+
+**A 4xx used to look exactly like a refusal.** Those eight rejected calls each
+printed "declined", which reads as "none of these were events" and sends you
+inspecting the listings instead of the request. `extract()` now re-raises 4xx
+(except 429) and swallows only transient failures: a malformed request fails
+identically for every listing, so failing loudly on the first is strictly
+better.
+
+**The prompt did not state the time format, and only the strongest model
+guessed it.** The schema comment said `HH:MM, 24-hour`; no rule did. Haiku
+returned `"5:00 PM"`, `_starts_at` could not parse it, and three good listings
+were dropped as "incomplete". Rule 12 states the format now. **Model choice was
+masking a prompt defect** — worth remembering before concluding a small model
+is not capable enough.
+
+**Thinking buys nothing here.** Opus 5 with and without produced identical
+extractions on all eight, at 1,905 vs 867 output tokens. `USE_THINKING = False`.
+
+Measured cost per 1,000 listings, after those fixes:
+
+| Model | per 1,000 | at 40/mo | Result on the eight |
+|---|---|---|---|
+| Opus 5 | $14.91 | $7.16/yr | 6 extracted, 2 refused |
+| Sonnet 4.5 | $7.27 | $3.49/yr | 7 extracted, 1 refused; put the film in 2025 |
+| **Haiku 4.5** | **$2.44** | **$1.17/yr** | identical to Opus, field for field |
+
+Real input is ~2,050 tokens per call — a chars÷4 estimate had said 1,268, so
+**that heuristic understated it by 60%**. Use `count_tokens`.
+
+The sample is eight listings. Haiku matching Opus on eight is not a guarantee
+it matches on eighty, and the failure that matters is inventing an event rather
+than a formatting slip. `MODEL` is one string.
 
 ## Dedup (M3)
 

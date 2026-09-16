@@ -26,8 +26,44 @@ from .models import KARACHI, Event
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5"
+# Haiku 4.5, not Opus 5. Measured on all eight real listings 2026-09-17: after
+# rule 12 pinned the time format, Haiku matched Opus field for field on every
+# one, including both refusals — at $2.44 per 1,000 listings against $14.91.
+# Opus is one string away if extraction quality ever disappoints; the sample is
+# only eight listings, and the failure that matters is inventing an event, not
+# a formatting slip.
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 2000
+
+# Adaptive thinking exists only on 4.6-and-later models. Sending it to Haiku 4.5
+# or Sonnet 4.5 is a hard 400, not a warning — so switching `MODEL` to a cheaper
+# older model is **not** the one-line change it looks like. Anything not listed
+# here is called without a `thinking` parameter at all, which is fine: this is a
+# short structured extraction, not a reasoning task.
+ADAPTIVE_THINKING_MODELS = (
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+)
+
+
+# Measured on all eight real listings, 2026-09-17: Opus 5 with and without
+# thinking produced identical extractions, at 1,905 vs 867 output tokens — 19%
+# more cost for no difference. This is short structured extraction from a few
+# hundred characters, not a reasoning task. Left switchable rather than ripped
+# out, because a flyer-image listing may yet justify it.
+USE_THINKING = False
+
+
+def _thinking_kwargs(model: str) -> dict:
+    if USE_THINKING and model.startswith(ADAPTIVE_THINKING_MODELS):
+        return {"thinking": {"type": "adaptive"}}
+    return {}
 
 
 @dataclass(frozen=True)
@@ -126,6 +162,13 @@ place, when the text says to call, WhatsApp or message it. Leave it null if \
 booking happens through a link, or if no number is given. Never put a bank \
 account number, an IBAN, an account title, or a number that appears for any \
 other reason in this field or any other field.
+12. Formats are exact. date is YYYY-MM-DD. start_time and end_time are \
+HH:MM on a 24-hour clock — "5:00 PM" is 17:00, "6 PM" is 18:00. A time that \
+is not in that form is dropped downstream, which loses the whole event.
+13. A listing is only worth extracting if it is close at hand. If resolving a \
+year-less date would put the event more than three months after the post date, \
+the post is stale rather than far-future: set is_event false with \
+decline_reason "no_date".
 """
 
 
@@ -246,21 +289,32 @@ def to_event(found: Extraction, listing: Listing) -> Event | None:
 
 
 def extract(listing: Listing, *, client=None) -> Event | None:
-    """One listing in, one `Event` or None out. Never raises.
+    """One listing in, one `Event` or None out.
 
-    A failed call must cost this listing, not the run: the pipeline processes a
-    batch of forwarded posts and one malformed message should not stop the rest.
+    Transient failures cost this listing, not the run: the pipeline processes a
+    batch of forwarded posts and one timeout should not stop the rest.
+
+    **A 4xx is re-raised**, because it is a bug in the request rather than a
+    problem with this listing — a wrong model name, a bad key, a parameter the
+    model does not accept. Swallowing those made eight malformed calls print
+    eight "declined" lines, which reads as "none of these were events" and sends
+    you off inspecting the listings. It will fail identically for every listing,
+    so failing loudly on the first is strictly better.
     """
     try:
         response = (client or _client()).messages.parse(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM,
-            thinking={"type": "adaptive"},
+            **_thinking_kwargs(MODEL),
             messages=[{"role": "user", "content": _content(listing)}],
             output_format=Extraction,
         )
-    except Exception:
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        if status is not None and 400 <= status < 500 and status != 429:
+            log.error("extract: request rejected (%s) — this is a bug, not a listing", status)
+            raise
         log.exception("extract: the model call failed for %s", _label(listing))
         return None
 
