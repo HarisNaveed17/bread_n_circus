@@ -1066,3 +1066,26 @@ def test_a_partial_number_is_not_a_match(sent, stored_digest, intake, monkeypatc
     raw, sig = _signed(_message_payload(text=LISTING, sender="923001234567"))
     app.handle_event(raw, sig)
     assert intake == []
+
+
+def test_the_shape_log_never_carries_content(caplog):
+    """Diagnostic logging must not turn into a transcript of strangers' texts.
+
+    `context` also names the *original* sender — a third party who never
+    messaged us — so its keys are logged and its values are not.
+    """
+    import logging
+
+    message = {
+        "from": "923001234567",
+        "type": "text",
+        "text": {"body": "SECRET BODY TEXT"},
+        "context": {"forwarded": True, "from": "923009999999", "id": "wamid.ORIGINAL"},
+    }
+    with caplog.at_level(logging.INFO):
+        app._log_shape(message)
+    logged = caplog.text
+    assert "SECRET BODY TEXT" not in logged
+    assert "923009999999" not in logged, "the original sender's number must not be logged"
+    assert "wamid.ORIGINAL" not in logged
+    assert "forwarded=True" in logged

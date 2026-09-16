@@ -184,9 +184,33 @@ def _body_text(message: dict) -> str:
     return (message.get("text") or {}).get("body") or ""
 
 
+def _log_shape(message: dict) -> None:
+    """Log a message's *shape*, never its content.
+
+    Answering one question: does Meta mark a forwarded message, and how? If it
+    does, a curator could simply forward a listing instead of retyping it with
+    a keyword, which is the gesture people actually reach for — WhatsApp gives
+    you no way to add a prefix to a forward.
+
+    Keys and booleans only. The bodies are strangers' messages and `context`
+    carries the *original* sender's number, which is a third party who never
+    messaged us — so its keys are logged, never its values.
+    """
+    context = message.get("context") or {}
+    log.info(
+        "bot: shape type=%s keys=%s context_keys=%s forwarded=%s frequently=%s",
+        message.get("type", "?"),
+        sorted(message.keys()),
+        sorted(context.keys()),
+        context.get("forwarded"),
+        context.get("frequently_forwarded"),
+    )
+
+
 def _handle_message(message: dict) -> None:
     sender = message["from"]
     log.info("bot: inbound %s message from %s", message.get("type", "?"), sender)
+    _log_shape(message)
 
     # Best-effort: a bookkeeping failure must never cost someone their reply.
     try:
