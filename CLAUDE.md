@@ -230,6 +230,63 @@ until it ages out of the window. One stale line beats a silently half-empty
 digest. `tests/test_cli.py` pins the regression with a source that returns
 events once and nothing after.
 
+## Intake: curators forward listings
+
+Built 2026-09-17. A curator texts the bot `/insert <listing text>`; the bot
+stores it; the next pipeline run extracts it. Migration `004_intake.sql`.
+
+```
+curator ──"/insert …"──> webhook ──> intake (queued)
+                            │
+                            └── 5 pending? ──> POST workflow_dispatch
+                                                      │
+                          pipeline: drain ──> extract ──> events ──> digest
+```
+
+**The allowlist is the security boundary, and it fails closed.** `CURATORS` is
+a comma-separated list of wa_ids; unset means nobody. Without it the number is
+an open pipe into the digest *and* into a model, on a public WhatsApp number. A
+non-curator sending `/insert` gets the ordinary digest reply and nothing is
+stored — deliberately indistinguishable from any other message, because "you
+are not authorised" teaches a stranger that the keyword does something.
+
+**Why the bot triggers a run at all.** GitHub's `schedule:` is 2.5-5 hours late
+here (§ Open threads), so a listing forwarded at lunchtime would otherwise
+appear near midnight. A `workflow_dispatch` from the bot is the only prompt
+trigger, and the bot is the only thing always on. The token is a fine-grained
+PAT, this repo, `actions: write`, nothing else, and it lives in Vercel. Unset,
+everything no-ops and listings wait for the schedule — intake still works.
+
+**Why it batches at five rather than firing per listing.** Every run scrapes
+every source, and theblackhole.pk answers a rate limit with an empty HTTP 200 —
+the failure that silently emptied six digests (§ Render from the store). Five
+forwards firing five runs would be ten fetches there in minutes. A 15-minute
+cooldown is the second guard; the workflow's own `concurrency` group is the
+third.
+
+**Every row leaves the queue, extracted or not.** A declined listing left
+pending would be re-extracted on every run forever — re-paying for the same
+refusal, and holding the pending count above the dispatch threshold so that
+*every* subsequent curator message fires a pipeline run.
+
+Two things this turned up that were not obvious:
+
+- **`events.url` was `NOT NULL`** from `001_init.sql`, and `Event.url` had been
+  made optional three days earlier. Two of three real WhatsApp samples have no
+  link, so the whole intake path failed at the first insert. SQLite cannot
+  `ALTER COLUMN`, so `Store._relax_not_null()` rebuilds the table from
+  `PRAGMA table_info` — dynamically, so later-added columns survive without it
+  knowing about them — and is guarded so it runs once.
+- **The prompt now lives in `isb_events/prompts/extract.md`**, not in a Python
+  string. It is the thing most likely to be edited, and a plain-text diff beats
+  a wall of escaped continuations. It ships inside the wheel (verified); the
+  HTML comment at the top is stripped before the model sees it.
+
+Intake is additive, so a failure there is caught and the digest renders without
+it: a missing `ANTHROPIC_API_KEY` means "no new forwarded events this run", not
+"no digest". `?health=` reports the curator count, whether dispatch is
+configured, and how many listings are pending.
+
 ## Intake extraction
 
 Built 2026-09-14, **verified against the live API 2026-09-17** — see
