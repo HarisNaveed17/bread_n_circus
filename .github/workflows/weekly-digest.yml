@@ -71,6 +71,15 @@ jobs:
                  "so the run would look green but persist nothing."
             exit 1
           fi
+          # Store.open() prefers an explicit ISB_DB_PATH over Turso, so on a
+          # runner it would write the whole digest to a file that vanishes with
+          # the job — green run, nothing persisted, same symptom as above.
+          if [ -n "${ISB_DB_PATH:-}" ]; then
+            echo "::error::ISB_DB_PATH is set ($ISB_DB_PATH). It takes priority" \
+                 "over Turso, so this run would persist to a file that dies with" \
+                 "the runner. Unset it."
+            exit 1
+          fi
 
       - name: Scrape and save the digest
         # A bare `render` refreshes the current week *and* the coming one. That

@@ -982,6 +982,23 @@ automation stays the fallback.
   sources" tests pin `pipeline.load_enabled_sources` to `[]` specifically
   because a live source in `sources.yaml` would otherwise make them hit the
   network.
+  `tests/conftest.py` makes it mechanical rather than remembered: an autouse
+  fixture clears `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `ANTHROPIC_API_KEY`
+  and `GITHUB_DISPATCH_TOKEN` for every test, so no test can reach a real
+  service even with `.env` sourced, and no individual test has to remember to.
+- **`ISB_DB_PATH` beats `TURSO_DATABASE_URL`, and that is deliberate**
+  (changed 2026-09-17). It used to be the other way round, which meant a
+  deliberate `ISB_DB_PATH=/tmp/scratch.db` was silently ignored the moment
+  `.env` had been sourced — and `.env` gets sourced for nearly every command
+  here. **A run intended for a throwaway file went to the production database
+  instead and wrote real rows to it.** Nothing was lost, but nothing warned
+  either.
+  The narrower, deliberately-set variable wins now: nobody types a database
+  path by accident, while `TURSO_DATABASE_URL` arrives ambiently from `.env`
+  or repo secrets. Setting both logs a warning naming which one won. The cron
+  sets only the URL, and `weekly-digest.yml` now fails fast if `ISB_DB_PATH`
+  is set on a runner — there, a local file dies with the job and the run goes
+  green having persisted nothing.
 - **The store must speak a dialect both backends accept.**
   `libsql_experimental` is qmark-only — a named `:param` dict raises
   `TypeError: 'dict' object cannot be converted to 'PyTuple'` — and it has no

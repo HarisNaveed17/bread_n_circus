@@ -49,13 +49,36 @@ class Store:
 
     @classmethod
     def open(cls) -> Store:
+        """Open the configured store. **An explicit `ISB_DB_PATH` wins.**
+
+        Turso used to take precedence, which meant a deliberate
+        `ISB_DB_PATH=/tmp/scratch.db` was silently ignored the moment `.env` had
+        been sourced — and `.env` is sourced for nearly everything. A run
+        intended for a throwaway file went to production instead, on 2026-09-17,
+        and wrote real rows there.
+
+        The narrower, deliberately-set variable is the one that should win: you
+        do not type a database path by accident. `TURSO_DATABASE_URL` arrives
+        ambiently from `.env` or from repo secrets, so it is the weaker signal.
+
+        The cron sets only `TURSO_DATABASE_URL`, so it is unaffected — and
+        `weekly-digest.yml` now refuses to run if `ISB_DB_PATH` is set on a
+        runner, where a local file dies with the job.
+        """
+        path = os.environ.get("ISB_DB_PATH")
         url = os.environ.get("TURSO_DATABASE_URL")
+
+        if path and url:
+            log.warning(
+                "store: ISB_DB_PATH=%s is set, so using the local file and IGNORING "
+                "TURSO_DATABASE_URL. Unset ISB_DB_PATH to write to Turso.",
+                path,
+            )
+        if path:
+            return cls(_connect_sqlite(path))
         if url:
             return cls(_connect_libsql(url, os.environ.get("TURSO_AUTH_TOKEN")))
-        path = os.environ.get("ISB_DB_PATH", "isb_events.db")
-        conn = sqlite3.connect(path)
-        conn.row_factory = sqlite3.Row
-        return cls(conn)
+        return cls(_connect_sqlite("isb_events.db"))
 
     # Columns added to an existing table, after the fact. These cannot live in a
     # .sql migration: `_migrate()` replays every file on every `open()`, and
@@ -394,6 +417,12 @@ class Store:
             """
         ).fetchone()
         return {"contacts": row[0] or 0, "opted_in": row[1] or 0}
+
+
+def _connect_sqlite(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def _connect_libsql(url: str, auth_token: str | None) -> sqlite3.Connection:
