@@ -417,3 +417,36 @@ def test_an_id_stays_stable_across_a_rebuild_from_the_store():
     # and it does not collide with the same title from a different message
     other = to_event(found, whatsapp.listing_from_message(CHESS, received_at=RECEIVED))
     assert event.id != other.id
+
+
+# -- the prompt file ---------------------------------------------------------
+
+
+def test_the_prompt_loads_from_its_file():
+    """It lives in `prompts/extract.md` so it can be tuned as plain text."""
+    from isb_events.extract import PROMPT_PATH
+
+    assert PROMPT_PATH.exists()
+    assert PROMPT_PATH.read_text().lstrip().startswith("<!--")
+
+
+def test_the_editing_note_does_not_reach_the_model():
+    from isb_events.extract import SYSTEM
+
+    assert "<!--" not in SYSTEM
+    assert SYSTEM.startswith("You extract event listings")
+
+
+def test_the_rules_the_live_run_proved_necessary_are_present():
+    """Each of these was added because a real listing went wrong without it.
+
+    Rule 12 is the one that matters most: without the time format stated,
+    Haiku 4.5 returned "5:00 PM", the parser dropped it, and three good
+    listings were lost as "incomplete".
+    """
+    from isb_events.extract import SYSTEM
+
+    assert "24-hour" in SYSTEM  # rule 12 — cost three listings when missing
+    assert "EARLIEST time an attendee is expected" in SYSTEM  # rule 4
+    assert "Islamabad occurrence" in SYSTEM  # rule 9
+    assert "three months" in SYSTEM  # rule 13
