@@ -106,7 +106,9 @@ class Extraction(BaseModel):
     """
 
     is_event: bool
-    decline_reason: Literal["not_an_event", "no_date", "no_time", "unclear"] | None = None
+    decline_reason: (
+        Literal["not_an_event", "no_date", "no_time", "unclear", "date_conflict"] | None
+    ) = None
     title: str | None = None
     date: str | None = None  # YYYY-MM-DD, Karachi
     start_time: str | None = None  # HH:MM, 24-hour
@@ -120,6 +122,10 @@ class Extraction(BaseModel):
     # actionable. `_clean_phone` rejects anything that is not phone-shaped, so
     # an account number cannot ride in through this field.
     registration_phone: str | None = None
+    # Which link to use, when the text has several. Picked by the model because
+    # it can read the labels — "Strava" against "IRU Web" — where taking the
+    # first URL found is arbitrary. Verified against the source text before use.
+    event_url: str | None = None
 
 
 # The prompt lives in a file, not here: it is the thing most likely to be
@@ -206,6 +212,23 @@ def _clean_phone(value: str | None) -> str | None:
     return f"{digits[:4]} {digits[4:]}"
 
 
+def _clean_url(value: str | None, text: str) -> str | None:
+    """A URL the model chose, but only if it really is in the source text.
+
+    The model is asked to copy a link exactly. This checks that it did: a URL
+    that does not appear verbatim in the message was repaired, shortened or
+    invented, and any of those would put a link in front of readers that the
+    organiser never wrote. Substring rather than parsing, deliberately — the
+    question is not "is this well formed" but "is this theirs".
+    """
+    if not value:
+        return None
+    value = value.strip().rstrip(".,)")
+    if not value.startswith(("http://", "https://")):
+        return None
+    return value if value in text else None
+
+
 def _starts_at(day: str, clock: str) -> datetime | None:
     try:
         parsed_day = date.fromisoformat(day)
@@ -249,7 +272,7 @@ def to_event(found: Extraction, listing: Listing) -> Event | None:
         category=(found.category or "").strip() or None,
         price_text=(found.price_text or "").strip() or None,
         contact_phone=_clean_phone(found.registration_phone),
-        url=listing.url,
+        url=_clean_url(found.event_url, listing.text) or listing.url,
         source_ref=listing.source_ref,
         sources=[listing.source],
     )

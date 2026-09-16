@@ -224,6 +224,7 @@ def test_the_schema_stays_narrow():
         "price_text",
         "category",
         "registration_phone",
+        "event_url",
     }
     reason = Extraction.model_fields["decline_reason"].annotation
     assert "str" not in str(reason).replace("Literal", "")
@@ -450,3 +451,61 @@ def test_the_rules_the_live_run_proved_necessary_are_present():
     assert "EARLIEST time an attendee is expected" in SYSTEM  # rule 4
     assert "Islamabad occurrence" in SYSTEM  # rule 9
     assert "three months" in SYSTEM  # rule 13
+
+
+# -- the model picks the link ------------------------------------------------
+
+
+def test_the_model_can_choose_between_several_links():
+    """A real forward carried a Strava deep link and the actual event page.
+
+    Taking the first URL found picked Strava, which is a tracking link, not the
+    event.
+    """
+    text = (
+        "*IRU Tuesday Community Easy Run*\n"
+        "*Strava* https://strava.app.link/2AqN8xxTr6b\n"
+        "*IRU Web* https://iru-expedition-pk.web.app/event/1789457241824\n"
+    )
+    found = Extraction(
+        is_event=True,
+        title="IRU Community Easy Run",
+        date="2026-09-15",
+        start_time="17:20",
+        event_url="https://iru-expedition-pk.web.app/event/1789457241824",
+    )
+    listing = Listing(text=text, source="whatsapp", url="https://strava.app.link/2AqN8xxTr6b")
+    assert to_event(found, listing).url == "https://iru-expedition-pk.web.app/event/1789457241824"
+
+
+def test_a_url_not_present_in_the_text_is_rejected():
+    """Copied exactly, or not at all.
+
+    A repaired, shortened or invented link would put something in front of
+    readers that the organiser never wrote.
+    """
+    text = "Come along! https://real.example/event/1"
+    for invented in (
+        "https://real.example/event/2",  # plausible, still not theirs
+        "https://evil.example/phish",
+        "real.example/event/1",  # no scheme
+        "javascript:alert(1)",
+    ):
+        found = Extraction(
+            is_event=True, title="X", date="2026-09-15", start_time="18:00", event_url=invented
+        )
+        listing = Listing(text=text, source="whatsapp", url=None)
+        assert to_event(found, listing).url is None, invented
+
+
+def test_the_adapter_url_is_the_fallback():
+    """No choice from the model means keep whatever the adapter found."""
+    found = Extraction(is_event=True, title="X", date="2026-09-15", start_time="18:00")
+    listing = Listing(text="see https://a.example/1", source="whatsapp", url="https://a.example/1")
+    assert to_event(found, listing).url == "https://a.example/1"
+
+
+def test_date_conflict_is_a_refusal_the_schema_allows():
+    """The defence against a stale forward being re-dated into the future."""
+    found = Extraction(is_event=False, decline_reason="date_conflict")
+    assert to_event(found, _listing()) is None
