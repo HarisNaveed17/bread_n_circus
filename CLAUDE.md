@@ -84,6 +84,35 @@ datetimes are timezone-aware in `Asia/Karachi`.
   instead, so anything in the base set gets shipped into the function.
   Use `uv sync --extra pipeline` for pipeline work.
 
+## Where this is, 2026-09-17
+
+Live and working end to end. Measured, not assumed:
+
+| | |
+|---|---|
+| Events in the store | 76 — 44 Ticketwala, 31 Black Hole, 1 forwarded |
+| Digests rendered | 4 weeks, 44 day-view rows |
+| Subscribers | 1 (me). **0 opted in** — nobody has been nudged, nothing sends |
+| Curator intake | 5 submitted, 1 became an event, 2 declined, 2 queued |
+| Scheduled cron runs | 17 in the last week, none missed, all 2.5-5h late |
+
+What a reader gets today: text the bot, get the next seven days; text `today`
+or `tomorrow`, get that day; text anything unrecognised, get a short nudge
+toward `this week`. A curator forwards a listing and it appears after the next
+pipeline run.
+
+**The thing that is not true yet: nobody uses it.** One subscriber, on a `+1`
+sandbox number that can only message allowlisted recipients. Every piece of
+machinery below works; none of it has an audience. Weigh new work against that
+before building more of it.
+
+Verified against the live API rather than inferred, in case a future session
+doubts it: inbound and outbound WhatsApp, Turso from inside Vercel, the
+extractor on eight real listings across three models, a forwarded message's
+payload shape, Instagram `og:` tags from a GitHub runner, Ticketwala event
+pages 403ing from the same runner, and the digest rendering from the store
+after a source returns nothing.
+
 ## Roadmap
 
 The milestone plan isn't (and wasn't) written up as a separate doc — it lives
