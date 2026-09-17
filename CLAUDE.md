@@ -18,11 +18,16 @@ uv run isb-events run --dry-run --week-of 2026-08-24
 uv run pytest          # offline — no test touches the network
 uv run ruff check . && uv run ruff format .
 git config core.hooksPath hooks   # once per clone; enforces the commit format
+uv run isb-events check           # read-only: is the live store still being fed?
 ```
+
+`architecture-v1.md` is the map of the whole system — read it first in a new
+session. Its appendix is the 2026-09-17 audit of what could be deleted.
 
 Commands: `fetch` (scrape enabled sources into the store) → `render` (render
 stored events into the `digests` row) → `send` (deliver the stored digest).
-`run` does all three. All take `--dry-run` and `--week-of YYYY-MM-DD`
+`run` does all three; `check` reads the store back and fails if the data says
+the pipeline has stopped (§ Knowing it is alive). All take `--dry-run` and `--week-of YYYY-MM-DD`
 (default: the coming Mon–Sun). Storage is local sqlite by default
 (`ISB_DB_PATH`) or Turso/libSQL if `TURSO_DATABASE_URL` is set. All
 datetimes are timezone-aware in `Asia/Karachi`.
@@ -235,6 +240,82 @@ the **Preview** environment in Vercel too (otherwise the health check fails on
 left on for previews, the smoke test needs
 `VERCEL_AUTOMATION_BYPASS_SECRET` as a repo secret. curl can send the bypass
 header; Meta cannot, which is why production protection stays off.
+
+## The bot's front door (beta prep, 2026-09-17)
+
+Four changes made before handing the number to beta testers. Each is small;
+what matters is what was decided.
+
+- **First contact gets the greeting and nothing else.** `bot/app.py GREETING`
+  ("Hello ji! 👀 Welcome to *Kya Scene Hai?*…") goes out as the reply to a
+  number's first message, whatever it said, with the three buttons under it.
+  "First" comes from `record_contact`, which now upserts with `RETURNING
+  message_count` — verified over Turso's HTTP API with a throwaway row. A
+  failed write means "not first": a blip costs a greeting, never duplicates
+  one. STOP as a first message is still honoured before the greeting; a
+  curator's forward or link as a first message is still a submission.
+- **Reply buttons instead of the text hint.** `whatsapp.send_buttons` sends an
+  `interactive` button message; `BUTTONS` is Today / Tomorrow / This week.
+  Every listing reply ends with a short `PICK_BODY` message carrying them,
+  because an interactive body is capped at 1024 chars and a day's listings
+  are longer. Short replies (greeting, "didn't catch that", "nothing listed")
+  carry the buttons on themselves. A tap arrives as `type: interactive` with
+  the button title, and `_body_text` hands the title to `intent.parse`, so a
+  tap is literally the typed word. `test_the_button_titles_are_words_the_parser_knows`
+  pins that: rename a button and it must still parse. `WEEK_HINT` is gone.
+- **`ksh` is a week word**, because the greeting tells people to text it.
+- **The two false promises are fixed.** `NO_DIGEST_REPLY` no longer says
+  Saturday; `OPT_IN_REPLY` no longer promises a weekly message. Consent is
+  still recorded so the list exists if a nudge ever ships.
+- **A bare Instagram post link from a curator is a submission.** The share
+  button sends plain text, not a forward, so it needed its own rule. The bot
+  matches the URL with its own copy of the pipeline's regex (it cannot import
+  `isb_events`; `test_the_bots_post_pattern_matches_the_pipelines` pins the
+  two), stores the URL as a `whatsapp` intake row, and `intake._listing_for`
+  routes a single-URL body to `instagram.fetch_listing` — so the adapter
+  written 2026-09-14 is finally reachable. An unfetchable post leaves the
+  queue as `no_listing`.
+
+**The nudge is not needed for beta.** Pull-only is the design: readers text
+first, replies are free, and the buttons keep them tapping inside the window.
+What pull-only cannot do is bring back someone who stopped texting. Build the
+nudge only if the beta shows people forgetting the number exists.
+
+## Knowing it is alive
+
+Built 2026-09-17. Every failure this project has had was silent and the run
+was green, so the monitoring reads the *data* back rather than watching for
+errors. `isb_events/check.py` asks four questions of the store and
+`isb-events check` exits 1 if any answer is bad:
+
+| Check | Fails when | Why that threshold |
+|---|---|---|
+| digest age | no row for the week containing today, or `created_at` > 18h old | two renders a day, each up to 5h late: one dropped firing must pass, two must not |
+| source silence | an enabled slug's `MAX(events.last_seen)` > 36h old, or absent | `last_seen` bumps on every upsert, so a scrape that keeps returning nothing is the only thing that stops it moving — while render-from-store keeps the digest looking full. This is the Black Hole failure, made visible |
+| upcoming | 0 rows in `digest_events` for today..today+6 | the bot would answer "nothing listed" |
+| intake | a pending row older than 24h | the drain is not running (`ANTHROPIC_API_KEY`?) |
+
+Intake channels (`whatsapp`) are exempt from the source rule: a forwarded
+listing is extracted once and never re-seen.
+
+It runs three ways. As the last step of `weekly-digest.yml`, replacing the
+inline summary script (so a bad render fails the run). On its own schedule in
+`digest-health.yml`, twice daily, so a digest run that *never fired* still
+gets checked. And whichever passes pings `HEARTBEAT_URL` if the secret is set
+— a Healthchecks.io dead man's switch, the only layer that fires when nothing
+runs at all. GitHub's failed-run email is the alert for the first two.
+
+The bot's `?health=` now asks Meta for the token's lifetime (`bot/whatsapp.py`
+`token_status`, moved out of `selftest`), so an uptime monitor polling it sees
+`EXPIRED` before a reader sees silence. CI and the production deploy fail on
+`EXPIRED`/`REJECTED` in the health body. **Measured 2026-09-17: the live token
+is TEMPORARY and expires 2026-10-29 10:53 UTC.** Replace it with a System
+User token before then or the bot goes quiet with no deploy having changed.
+
+Verified against the live store the day it was built: `check` passed with both
+sources seen 0.0h ago and 18 upcoming events. `tests/test_check.py` reproduces
+the empty-200 scenario end to end through the CLI: four green renders, the
+event still in the digest, and only `check` failing.
 
 ## Render from the store
 

@@ -24,12 +24,21 @@ uv run isb-events run --dry-run --week-of 2026-08-24
 | `render` | Render stored events into the `digests` row (this week + next) |
 | `send`   | Print the stored digest (`--dry-run`); no push channel yet |
 | `run`    | `fetch` → `render` → `send` in one shot           |
+| `check`  | Read the store back and exit 1 if the data says the pipeline has stopped |
 
 All take `--dry-run` and `--week-of YYYY-MM-DD`. With no `--week-of`, `render`
 covers **two** weeks — the one today falls in and the one after it — so that the
 bot's "what's on today" stays fresh between runs; `fetch`, `send` and `run` use
 the coming Mon–Sun as before. An explicit `--week-of` always means that week
 alone.
+
+`check` writes nothing. It reports the age of each digest, when each enabled
+source last contributed an event, how many events the bot would serve for the
+next seven days, and how long the oldest forwarded listing has been queued,
+then fails on: no digest for this week, a digest older than 18h, a source
+silent for 36h, zero upcoming events, or a listing queued for over 24h. Every
+threshold is a flag (`--max-source-age 12`). Add `--digest` to print the
+rendered text too. See [Monitoring](#monitoring).
 
 ## Configuration
 
@@ -94,6 +103,50 @@ is best-effort and drops firings; running twice a day means a missed one costs
 hours rather than a week. Re-running is safe — events upsert by id, and
 `dedupe` merges a listing that was re-published under a new URL.
 
+## Monitoring
+
+The failures this project has had were all silent: a source answering a rate
+limit with an empty 200, a run persisting to a file that died with the runner,
+a migration that never reached Turso. Nothing raised and every run was green.
+So monitoring here means **reading the data back**, not watching for errors.
+
+| Layer | What it catches | Set-up |
+|---|---|---|
+| `isb-events check`, last step of every digest run | a source that stopped contributing, an empty upcoming window, a stuck intake queue | nothing — it is in `weekly-digest.yml` |
+| `digest-health.yml`, twice daily on its own cron | a digest run that never fired, or fired and wrote nothing | nothing |
+| Heartbeat: a URL pinged only after a green check | both crons being dropped, or GitHub Actions being down — nothing inside GitHub can report that | one repo secret, below |
+| `?health=` polled from outside | the bot side: Turso unreachable from Vercel, a missing table, an expired WhatsApp token | an uptime monitor with a keyword alert |
+
+GitHub emails you when a scheduled workflow fails — check *Settings →
+Notifications → Actions* is on, and note the email goes to whoever last
+edited the workflow file. That is the alert for the first two layers.
+
+**The heartbeat** is a dead man's switch. Create a check at
+[healthchecks.io](https://healthchecks.io) (free) with a period of 12 hours
+and a grace of 8 hours — the cron lands up to five hours late — and store its
+ping URL:
+
+```bash
+gh secret set HEARTBEAT_URL --body "https://hc-ping.com/<uuid>"
+```
+
+Both workflows ping it after a passing check and skip silently if the secret
+is unset. If no ping arrives inside period + grace, Healthchecks emails you.
+That is the only layer that fires when *nothing* runs.
+
+**The bot** has no cron to watch, so watch its health endpoint instead. Any
+uptime monitor (UptimeRobot, Better Stack, Healthchecks' own HTTP checks) can
+poll `https://<project>.vercel.app/api/webhook?health=<verify token>` every
+hour and alert on the words `EXPIRED`, `REJECTED`, `MISSING` or `UNREACHABLE`
+in the body. The token line now asks Meta how long the token has left, so a
+temporary token shows as `TEMPORARY … (Nh left)` well before it dies.
+
+Datadog and friends would work, but they solve a different problem: a
+dashboard is for a team watching many services in real time. This is one
+cron and one function, with one person, and the questions are "did it run"
+and "did the numbers move". A failed workflow email and a dead man's switch
+answer both for free.
+
 Needs two repo secrets: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. The job
 fails fast without them rather than silently writing to a throwaway sqlite
 file on the runner. Trigger it by hand from the Actions tab ("Run workflow"),
@@ -113,15 +166,32 @@ What it understands:
 
 | Message | Reply |
 |---------|-------|
+| the first message from a number, whatever it says | The greeting ("Hello ji! 👀 Welcome to Kya Scene Hai?…") with the three buttons |
 | `today`, `tonight` | Just today's events |
 | `tomorrow`, `tmrw` | Just tomorrow's |
-| anything else | The whole week (the default) |
-| `subscribe` / `start` / `join` | Opt in to the weekly nudge, then the digest |
+| `ksh`, `week`, `what's on`, `events`… | The next seven days (the default) |
+| a tap on *Today* / *Tomorrow* / *This week* | Same as typing the word |
+| anything else | "Didn't catch that", with the buttons |
+| `subscribe` / `start` / `join` | Recorded as consent for a future weekly heads-up; the reply says none is sent yet |
 | `stop` / `unsubscribe` / `cancel` | Opt out |
+| a bare Instagram post link, from a curator | Queued for the pipeline, which fetches the post's caption |
+
+Every listing reply ends with a short message carrying three reply buttons,
+*Today*, *Tomorrow* and *This week*. Short replies carry the buttons on
+themselves. A tap comes back as an `interactive` message with the button's
+title, which is parsed exactly like typed text. Buttons are free inside the
+24-hour window like any other reply, and need no template.
 
 Day words are matched as whole words anywhere in the message, so "what's on
 tomorrow?" works and an event called "Tomorrowland" does not narrow the digest.
 The opt-in/opt-out words must be the *entire* message.
+
+The greeting goes out once per number. The bot knows a number is new because
+`record_contact` upserts the `subscribers` row with `RETURNING message_count`,
+so the same round trip that logs the contact says whether it is the first
+(verified over Turso's HTTP API 2026-09-17). If that write fails the message
+is treated as *not* the first, so a database blip costs a greeting rather than
+sending a duplicate one.
 
 Day replies are assembled from `digest_events`, a table the pipeline fills on
 every render with one row per event — the block text already rendered by

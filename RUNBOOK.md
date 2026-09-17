@@ -172,6 +172,38 @@ tuning. A late cron means a stale digest for a few hours, not an outage.
 
 ---
 
+## Symptom: `isb-events check` failed, or the heartbeat monitor fired
+
+The check reads the store and reports what has stopped moving. Run it locally
+against the same database to see the numbers — it writes nothing:
+
+```bash
+uv run isb-events check                 # same thresholds as the cron
+uv run isb-events check --digest        # ...plus the rendered text
+gh run list --workflow=digest-health.yml --limit 5
+```
+
+Each failure line names the layer:
+
+| Line begins | Meaning | Look at |
+| --- | --- | --- |
+| `no digest row for the week of …` | nothing has rendered this week | `gh run list --workflow=weekly-digest.yml`; dispatch one by hand |
+| `digest … was last rendered Nh ago` | two consecutive firings missed, or the render step is failing | the last run's log; `TURSO_DATABASE_URL` still set as a secret? |
+| `source X last contributed Nh ago` | the scrape returns nothing, but the digest still shows X's old events, so nothing else noticed | fetch the site by hand: rate limit (empty 200), a markup change (`parse` returns `[]`), or the site is down. `uv run isb-events fetch -v` shows the count |
+| `source X has never contributed` | enabled in `sources.yaml`, but its slug matches no registered scraper, or the scraper has never returned an event | `sources/__init__.py` imports it? |
+| `0 events in digest_events for the 7 days from …` | the bot would answer "nothing listed" | did `render` write `digest_events`? Are the sources genuinely empty this week? |
+| `N listing(s) queued, the oldest for Nh` | intake is not being drained | `ANTHROPIC_API_KEY` unset on the runner, or `extract` raising a 4xx (log says "request rejected") |
+
+**The heartbeat fired but every run is green.** Then the secret is wrong or
+the ping is being blocked: `gh secret list` shows `HEARTBEAT_URL`, and the
+"Heartbeat" step in the last run log says `heartbeat sent` or `unset`.
+
+**The heartbeat fired and there are no recent runs.** GitHub dropped both
+schedules, or Actions is down. Dispatch the digest by hand; if it becomes a
+habit, the fix is an external trigger, as above.
+
+---
+
 ## Symptom: a push did not produce a preview
 
 ```bash
