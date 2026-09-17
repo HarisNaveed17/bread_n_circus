@@ -12,3 +12,9 @@ dist/
 .vercel/
 .vercel
 .env*
+
+# Local agent tooling. Skills installed here are per-developer, and
+# `settings.local.json` is per-machine by name. `skills-lock.json` only pins
+# what lives in .claude/skills, so it is meaningless without it.
+.claude/
+skills-lock.json
