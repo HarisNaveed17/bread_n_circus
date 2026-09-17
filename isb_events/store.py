@@ -23,12 +23,18 @@ import os
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from .models import KARACHI, DigestWindow, Event
 
 log = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+class SourceSeen(NamedTuple):
+    last_seen: datetime
+    events: int
 
 
 def _now_iso() -> str:
@@ -333,6 +339,68 @@ class Store:
             (_now_iso(), week_of.isoformat()),
         )
         self._conn.commit()
+
+    # -- health ---------------------------------------------------------------
+    #
+    # What `check.py` reads to decide whether the system is still doing its job.
+    # Every failure this project has actually had was silent: a source that
+    # answered a rate limit with an empty 200, a run that went green having
+    # persisted nothing, a migration that never reached Turso. None of them
+    # raised. These queries are the questions that would have caught them.
+
+    def list_digests(self) -> list[dict]:
+        """`week_of`, `created_at` and text length for every rendered week."""
+        rows = self._conn.execute(
+            "SELECT week_of, created_at, LENGTH(rendered_text) FROM digests ORDER BY week_of"
+        ).fetchall()
+        return [{"week_of": r[0], "created_at": r[1], "chars": r[2]} for r in rows]
+
+    def last_seen_by_source(self) -> dict[str, SourceSeen]:
+        """When each source last had an event upserted, and how many it has.
+
+        `last_seen` is bumped on every upsert, so a source whose scrape keeps
+        returning its events keeps its timestamp fresh. One whose scrape has
+        started returning nothing — an empty 200, a markup change, a dead site
+        — stops advancing here while its stored events go on filling the
+        digest. That gap is the silent failure, and this is how it is seen.
+
+        Grouped by the stored JSON array rather than by slug, then split in
+        Python: a merged event carries two slugs, and the query has to work on
+        both backends without JSON functions.
+        """
+        rows = self._conn.execute(
+            "SELECT sources, MAX(last_seen), COUNT(*) FROM events GROUP BY sources"
+        ).fetchall()
+        seen: dict[str, SourceSeen] = {}
+        for sources_json, latest, count in rows:
+            try:
+                slugs = json.loads(sources_json) if sources_json else []
+            except ValueError:
+                continue
+            when = datetime.fromisoformat(latest)
+            for slug in slugs:
+                prior = seen.get(slug)
+                seen[slug] = SourceSeen(
+                    last_seen=max(when, prior.last_seen) if prior else when,
+                    events=count + (prior.events if prior else 0),
+                )
+        return seen
+
+    def upcoming_event_count(self, start: date, days: int) -> int:
+        """Rows in `digest_events` from `start` for `days` days — what the bot serves."""
+        end = date.fromordinal(start.toordinal() + days)
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM digest_events WHERE event_date >= ? AND event_date < ?",
+            (start.isoformat(), end.isoformat()),
+        ).fetchone()
+        return int(row[0] or 0)
+
+    def oldest_pending_intake(self) -> datetime | None:
+        """When the longest-waiting queued listing arrived, or None if none is queued."""
+        row = self._conn.execute(
+            "SELECT MIN(received_at) FROM intake WHERE processed_at IS NULL"
+        ).fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
 
     # -- intake ---------------------------------------------------------------
     #

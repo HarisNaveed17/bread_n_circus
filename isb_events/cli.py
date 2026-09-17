@@ -1,19 +1,22 @@
-"""Typer CLI: `fetch`, `render`, `send`, `run`.
+"""Typer CLI: `fetch`, `render`, `send`, `run`, `check`.
 
 Every command takes `--dry-run` and `--week-of YYYY-MM-DD` (default: the coming
 Mon–Sun). `render` writes the `digests` row; `send` reads it. Text never passes
-from render to send in memory.
+from render to send in memory. `check` reads the store back and exits non-zero
+if the data says the pipeline has stopped — see `check.py`.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import typer
 
+from . import check as health
+from . import pipeline
 from .intake import drain
-from .models import DigestWindow, Event
+from .models import KARACHI, DigestWindow, Event
 from .normalize import dedupe
 from .notify.base import DryRunNotifier, Notifier
 from .pipeline import run_fetch
@@ -194,6 +197,65 @@ def run(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
         _notifier(dry_run).send(messages)
         if not dry_run:
             store.mark_digest_sent(week_start)
+
+
+def _now() -> datetime:
+    """Seam for tests to freeze the clock `check` compares ages against."""
+    return datetime.now(KARACHI)
+
+
+@app.command()
+def check(
+    week_of: str = WeekOpt,
+    max_digest_age: float = typer.Option(
+        health.MAX_DIGEST_AGE.total_seconds() / 3600,
+        help="Hours before a digest row counts as stale.",
+    ),
+    max_source_age: float = typer.Option(
+        health.MAX_SOURCE_AGE.total_seconds() / 3600,
+        help="Hours since a source last contributed before it counts as silent.",
+    ),
+    max_intake_age: float = typer.Option(
+        health.MAX_INTAKE_AGE.total_seconds() / 3600,
+        help="Hours a forwarded listing may wait unprocessed.",
+    ),
+    digest: bool = typer.Option(
+        False, "--digest", help="Also print the rendered digest text for the checked weeks."
+    ),
+) -> None:
+    """Read the store back and fail if the data says the pipeline has stopped.
+
+    Runs after every render, and on its own schedule so that a render that never
+    fired still gets noticed. Nothing here fetches or writes.
+    """
+    now = _now()
+    sources = [s.slug for s in pipeline.load_enabled_sources()]
+    with Store.open() as store:
+        for line in health.summary(store, now=now, sources=sources):
+            typer.echo(line)
+        if digest:
+            for window in _windows(week_of):
+                row = store.get_digest(_week_start(window))
+                typer.echo(f"\n### Digest for week of {_week_start(window)}\n")
+                typer.echo("```")
+                typer.echo(row["rendered_text"] if row else "(no row)")
+                typer.echo("```")
+        problems = health.check(
+            store,
+            now=now,
+            sources=sources,
+            week_of=date.fromisoformat(week_of) if week_of else None,
+            max_digest_age=timedelta(hours=max_digest_age),
+            max_source_age=timedelta(hours=max_source_age),
+            max_intake_age=timedelta(hours=max_intake_age),
+        )
+    typer.echo()
+    if not problems:
+        typer.echo("OK — every check passed")
+        return
+    for problem in problems:
+        typer.echo(f"**{problem}**")
+    raise typer.Exit(1)
 
 
 if __name__ == "__main__":

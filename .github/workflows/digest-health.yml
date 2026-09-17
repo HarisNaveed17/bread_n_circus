@@ -1,0 +1,70 @@
+name: Digest health
+
+# Reads the store and fails if the data says the pipeline has stopped. Nothing
+# here fetches, extracts or writes — it is `isb-events check`, on its own clock.
+#
+# Why a separate workflow when the digest run already ends with the same check:
+# a digest run that never fires produces no failed run. GitHub's scheduler
+# drops firings (CLAUDE.md § Open threads), and the only way to notice from
+# inside GitHub is a *different* job asking "is the digest fresh?". This is
+# that job. It is subject to the same scheduler, which is why the heartbeat
+# below — an external monitor expecting a ping — is the real backstop.
+#
+# GitHub emails the person who last edited this file when a scheduled run
+# fails (Settings -> Notifications -> Actions). That is the alert.
+
+on:
+  schedule:
+    # 08:47 and 20:47 Karachi (03:47 and 15:47 UTC). Each sits a few hours
+    # after a digest slot should have landed, even with the observed delay,
+    # so a fresh digest is the expectation and a stale one is news. Off the
+    # hour, like the digest cron, for a quieter queue.
+    - cron: "47 3 * * *"
+    - cron: "47 15 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: digest-health
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --extra pipeline
+
+      - name: Fail fast if the store is not configured
+        run: |
+          if [ -z "$TURSO_DATABASE_URL" ]; then
+            echo "::error::TURSO_DATABASE_URL is unset; checking a runner-local file proves nothing."
+            exit 1
+          fi
+
+      - name: Is the digest still being fed?
+        run: |
+          set -o pipefail
+          uv run isb-events check | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Heartbeat
+        if: success()
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: |
+          if [ -n "$HEARTBEAT_URL" ]; then
+            curl -fsS -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" && echo "heartbeat sent"
+          else
+            echo "HEARTBEAT_URL unset; no heartbeat sent"
+          fi

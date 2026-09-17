@@ -93,68 +93,39 @@ jobs:
             uv run isb-events render
           fi
 
-      - name: Show the digest in the run summary
+      - name: Check the store and show the digest in the run summary
+        # `isb-events check` reads the store back the way the bot will and
+        # fails if the data says the pipeline has stopped: no digest for this
+        # week, a source that has not contributed in 36h, an empty upcoming
+        # window, or a forwarded listing stuck in the queue. The render step
+        # above cannot tell — a source answering with an empty 200 is not an
+        # error, and the digest still renders from the store. See
+        # isb_events/check.py.
+        #
+        # `tee`, not `>`: the summary page is nicer to read, but the step log
+        # is what survives and what `gh run view --log` can reach. pipefail so
+        # the check's exit status wins over tee's.
         run: |
-          # `tee`, not `>`: the summary page is nicer to read, but the step log
-          # is what survives, what `gh run view --log` can reach, and what can
-          # be grepped later. Writing only to the summary made a silent success
-          # indistinguishable from an empty one.
-          #
-          # pipefail because the pipe would otherwise report tee's exit status
-          # and swallow a Python traceback entirely.
           set -o pipefail
-          uv run python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import os
-          from datetime import date
+          if [ -n "$WEEK_OF" ]; then
+            uv run isb-events check --digest --week-of "$WEEK_OF" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            uv run isb-events check --digest | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
-          from isb_events.models import DigestWindow
-          from isb_events.store import Store
-
-          # The same weeks `render` just wrote: an explicit one, or the current
-          # week and the coming one. Reporting only `coming_week` would leave
-          # the run summary silent about the week today actually falls in.
-          week_of = os.environ.get("WEEK_OF") or ""
-          if week_of:
-              windows = [DigestWindow.week_of(date.fromisoformat(week_of))]
-          else:
-              current, coming = DigestWindow.current_week(), DigestWindow.coming_week()
-              windows = [current] if current == coming else [current, coming]
-
-          # Scheme only — never the host or the token.
-          url = os.environ.get("TURSO_DATABASE_URL") or ""
-          backend = url.split("://")[0] + "://" if "://" in url else "local sqlite file"
-          with Store.open() as store:
-              rows = {w.start.date(): store.get_digest(w.start.date()) for w in windows}
-              weeks = [r[0] for r in store._conn.execute(
-                  "SELECT week_of FROM digests ORDER BY week_of DESC LIMIT 5"
-              ).fetchall()]
-              day_rows = store._conn.execute(
-                  "SELECT event_date, COUNT(*) FROM digest_events GROUP BY event_date"
-                  " ORDER BY event_date"
-              ).fetchall()
-
-          print(f"- store: {backend}")
-          print(f"- weeks present in `digests`: {weeks or 'none'}")
-          # The day views are what "what's on today" reads; a render that wrote
-          # a digest but no per-day rows is the failure worth seeing here.
-          print(f"- day views: {', '.join(f'{d} ({n})' for d, n in day_rows) or 'none'}")
-          print()
-
-          missing = [str(w) for w, row in rows.items() if row is None]
-          if missing:
-              # The render step reported success, so an empty read here means
-              # the two steps did not agree on a database or on a week.
-              print(f"**No digest row for {', '.join(missing)}.**")
-              raise SystemExit(1)
-
-          for week_start, row in rows.items():
-              text = row["rendered_text"]
-              print(f"### Digest for week of {week_start}")
-              print()
-              print(f"- {len(text)} chars, {text.count(chr(10) * 2) + 1} blocks")
-              print()
-              print("```")
-              print(text)
-              print("```")
-              print()
-          PY
+      - name: Heartbeat
+        # Dead man's switch. A scheduled workflow that never fires produces no
+        # failed run to be notified about, so nothing inside GitHub can report
+        # it. Pinging an external monitor on every *successful* check turns
+        # silence into an alert: the monitor expects a ping within its grace
+        # period and emails when one does not arrive. Healthchecks.io's free
+        # tier is enough. Optional — with the secret unset, nothing is pinged.
+        if: success()
+        env:
+          HEARTBEAT_URL: ${{ secrets.HEARTBEAT_URL }}
+        run: |
+          if [ -n "$HEARTBEAT_URL" ]; then
+            curl -fsS -m 10 --retry 3 -o /dev/null "$HEARTBEAT_URL" && echo "heartbeat sent"
+          else
+            echo "HEARTBEAT_URL unset; no heartbeat sent"
+          fi
