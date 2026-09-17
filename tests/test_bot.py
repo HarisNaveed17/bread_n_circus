@@ -33,13 +33,24 @@ UPCOMING_REPLY = (
 
 
 def _week(*parts: str) -> list[str]:
-    """A fallback reply: the stored weekly text, with the day-filter hint last."""
-    return [*parts[:-1], f"{parts[-1]}\n\n{app.WEEK_HINT}"]
+    """A fallback reply: the stored weekly text, then the button message."""
+    return [*parts, app.PICK_BODY]
 
 
 def _upcoming() -> list[str]:
-    """The default reply, built from digest_events rather than the weekly text."""
-    return [f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"]
+    """The default reply, built from digest_events, then the button message."""
+    return [UPCOMING_REPLY, app.PICK_BODY]
+
+
+BUTTON_TITLES = ("Today", "Tomorrow", "This week")
+
+
+class _Outbox(list):
+    """Every send in order as `(to, body)`; button sends also land in `.buttons`."""
+
+    def __init__(self):
+        super().__init__()
+        self.buttons = []
 
 
 @pytest.fixture(autouse=True)
@@ -85,9 +96,15 @@ def _message_payload(text="what's on", sender="923001234567") -> dict:
 
 @pytest.fixture
 def sent(monkeypatch):
-    """Capture outbound Cloud API sends."""
-    outbox = []
+    """Capture outbound Cloud API sends, text and buttons alike."""
+    outbox = _Outbox()
     monkeypatch.setattr(whatsapp, "send_text", lambda to, body: outbox.append((to, body)))
+
+    def send_buttons(to, body, buttons=whatsapp.BUTTONS):
+        outbox.append((to, body))
+        outbox.buttons.append((to, body, tuple(title for _, title in buttons)))
+
+    monkeypatch.setattr(whatsapp, "send_buttons", send_buttons)
     return outbox
 
 
@@ -103,6 +120,8 @@ def stored_digest(monkeypatch):
         monkeypatch.setattr(store, "current_digest", lambda: (text, "2026-08-31"))
 
     monkeypatch.setattr(store, "query", lambda sql, args=None: [[0]])
+    # `?health=` asks Meta how long the token has left; that is a Graph call.
+    monkeypatch.setattr(whatsapp, "token_status", lambda: "valid, never expires")
     # The default reply reads digest_events, not the stored weekly text. Without
     # this the rolling-window path would raise and silently fall back, and every
     # assertion below would pass while testing the wrong code.
@@ -237,7 +256,7 @@ def test_unsigned_event_is_rejected_without_sending(sent, stored_digest):
 def test_message_gets_the_stored_digest(sent, stored_digest):
     raw, sig = _signed(_message_payload())
     assert app.handle_event(raw, sig) == (200, "ok")
-    assert sent == [("923001234567", *_upcoming())]
+    assert sent == [("923001234567", body) for body in _upcoming()]
 
 
 def test_multi_part_digest_is_sent_as_separate_messages(sent, stored_digest):
@@ -400,6 +419,34 @@ def test_send_text_returns_the_parsed_response(monkeypatch):
     assert sent_payload["text"]["body"] == "hi"
 
 
+def test_send_buttons_uses_the_interactive_shape(monkeypatch):
+    sent_payload = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        whatsapp.httpx,
+        "post",
+        lambda url, **kw: (sent_payload.update(kw["json"]), _Resp())[1],
+    )
+    whatsapp.send_buttons("923236501038", "Pick a view")
+    assert sent_payload["type"] == "interactive"
+    inter = sent_payload["interactive"]
+    assert inter["type"] == "button"
+    assert inter["body"] == {"text": "Pick a view"}
+    assert inter["action"]["buttons"] == [
+        {"type": "reply", "reply": {"id": "today", "title": "Today"}},
+        {"type": "reply", "reply": {"id": "tomorrow", "title": "Tomorrow"}},
+        {"type": "reply", "reply": {"id": "week", "title": "This week"}},
+    ]
+    assert all(len(title) <= 20 for _, title in whatsapp.BUTTONS)
+    assert len(whatsapp.BUTTONS) <= 3
+
+
 def test_send_template_uses_the_template_shape(monkeypatch):
     sent_payload = {}
 
@@ -508,6 +555,7 @@ def test_health_reports_a_reachable_digest(stored_digest):
 
 
 def test_health_distinguishes_an_empty_store_from_a_broken_one(monkeypatch):
+    monkeypatch.setattr(whatsapp, "token_status", lambda: "valid, never expires")
     monkeypatch.setattr(store, "current_digest", lambda: None)
     assert "NO ROWS" in app.handle_health(VERIFY_TOKEN)[1]
 
@@ -529,6 +577,35 @@ def test_health_is_reachable_over_wsgi(stored_digest):
     status, body = _wsgi_call(query=f"health={VERIFY_TOKEN}")
     assert status.startswith("200")
     assert "digest" in body
+
+
+def test_health_reports_the_token_lifetime(stored_digest, monkeypatch):
+    """`set` was true right up until the 24-hour token died. Now Meta is asked."""
+    assert "wa token  : set — valid, never expires" in app.handle_health(VERIFY_TOKEN)[1]
+
+    monkeypatch.setattr(whatsapp, "token_status", lambda: "EXPIRED at 2026-09-16 10:00 UTC")
+    assert "wa token  : set — EXPIRED" in app.handle_health(VERIFY_TOKEN)[1]
+
+
+def test_health_survives_meta_being_down(stored_digest, monkeypatch):
+    """A Graph outage must not turn the health check red for the wrong reason."""
+
+    def boom():
+        raise TimeoutError("graph.facebook.com")
+
+    monkeypatch.setattr(whatsapp, "token_status", boom)
+    status, body = app.handle_health(VERIFY_TOKEN)
+    assert status == 200
+    assert "wa token  : set — could not check (TimeoutError)" in body
+    assert "digest    : ok" in body
+
+
+def test_health_does_not_ask_meta_about_a_missing_token(stored_digest, monkeypatch):
+    monkeypatch.delenv("WHATSAPP_TOKEN")
+    calls = []
+    monkeypatch.setattr(whatsapp, "token_status", lambda: calls.append(1))
+    assert "wa token  : MISSING" in app.handle_health(VERIFY_TOKEN)[1]
+    assert calls == []
 
 
 # -- the subscription diagnostic ---------------------------------------------
@@ -622,28 +699,27 @@ def test_subscribe_surfaces_a_graph_error(monkeypatch, capsys):
 def test_token_status_flags_a_temporary_token(monkeypatch):
     import datetime
 
-    from bot import selftest
-
     soon = int((datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=3)).timestamp())
     monkeypatch.setattr(whatsapp, "graph_get", lambda p, q=None: {"data": {"expires_at": soon}})
-    status = selftest._token_status()
+    status = whatsapp.token_status()
     assert "TEMPORARY" in status and "System User" in status
 
 
 def test_token_status_recognises_a_permanent_token(monkeypatch):
-    from bot import selftest
-
     monkeypatch.setattr(whatsapp, "graph_get", lambda p, q=None: {"data": {"expires_at": 0}})
-    assert "never expires" in selftest._token_status()
+    assert "never expires" in whatsapp.token_status()
+
+
+def test_token_status_reports_an_expired_token(monkeypatch):
+    monkeypatch.setattr(whatsapp, "graph_get", lambda p, q=None: {"data": {"expires_at": 86400}})
+    assert whatsapp.token_status().startswith("EXPIRED at 1970-01-02")
 
 
 def test_token_status_reports_rejection(monkeypatch):
-    from bot import selftest
-
     monkeypatch.setattr(
         whatsapp, "graph_get", lambda p, q=None: {"error": {"message": "Session has expired"}}
     )
-    assert "REJECTED" in selftest._token_status()
+    assert "REJECTED" in whatsapp.token_status()
 
 
 # -- what did they ask for? --------------------------------------------------
@@ -703,7 +779,10 @@ def day_rows(monkeypatch):
 def test_asking_for_today_gets_only_that_day(sent, stored_digest, day_rows):
     raw, sig = _signed(_message_payload(text="what's on today"))
     app.handle_event(raw, sig)
-    assert sent == [("923001234567", "*Islamabad — Tue 1 Sep*\n\n• *Talk*\n🕒 7pm")]
+    assert sent == [
+        ("923001234567", "*Islamabad — Tue 1 Sep*\n\n• *Talk*\n🕒 7pm"),
+        ("923001234567", app.PICK_BODY),
+    ]
 
 
 def test_the_day_heading_comes_from_the_stored_label(sent, stored_digest, day_rows):
@@ -750,23 +829,118 @@ def test_a_day_reply_splits_over_the_char_limit(sent, stored_digest, day_rows):
     assert all(len(body) <= app.WHATSAPP_LIMIT for _, body in sent)
 
 
-def test_the_default_reply_hints_at_the_day_filter(sent, stored_digest):
+def test_every_listing_reply_ends_with_the_buttons(sent, stored_digest, day_rows):
+    """Nobody discovers a filter they were never shown; the buttons show it."""
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
-    assert sent[0][1] == f"{UPCOMING_REPLY}\n\n{app.WEEK_HINT}"
+    assert sent == [("923001234567", UPCOMING_REPLY), ("923001234567", app.PICK_BODY)]
+    assert sent.buttons == [("923001234567", app.PICK_BODY, BUTTON_TITLES)]
+
+    sent.clear(), sent.buttons.clear()
+    raw, sig = _signed(_message_payload(text="today"))
+    app.handle_event(raw, sig)
+    assert sent[-1] == ("923001234567", app.PICK_BODY)
+    assert len(sent.buttons) == 1
 
 
-def test_the_hint_is_dropped_rather_than_overflowing_a_message(sent, stored_digest, monkeypatch):
-    # Sized so the packed message lands exactly on the limit: the hint can only
-    # be dropped, never truncated, and never split into a second message.
+def test_the_buttons_are_a_separate_message_so_nothing_overflows(sent, stored_digest, monkeypatch):
+    # A packed message exactly on the limit: the buttons must not be glued to it.
     overhead = len("*Islamabad — Sun 6 Sep onwards*\n\n*Sun 6 Sep*\n\n")
     big = "y" * (app.WHATSAPP_LIMIT - overhead)
     monkeypatch.setattr(store, "events_between", lambda a, b: [("2026-09-06", "Sun 6 Sep", big)])
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
+    assert len(sent) == 2
+    assert len(sent[0][1]) == app.WHATSAPP_LIMIT
+    assert sent[1][1] == app.PICK_BODY
+
+
+def test_short_replies_carry_the_buttons_on_themselves(sent, stored_digest, monkeypatch):
+    """A one-line reply and its buttons are one message, not two."""
+    monkeypatch.setattr(store, "events_between", lambda a, b: [])
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
     assert len(sent) == 1
-    assert app.WEEK_HINT not in sent[0][1]
-    assert len(sent[0][1]) <= app.WHATSAPP_LIMIT
+    assert sent.buttons == [
+        ("923001234567", app.NOTHING_UPCOMING.format(days=app.UPCOMING_DAYS), BUTTON_TITLES)
+    ]
+
+
+def test_a_tapped_button_is_handled_like_the_typed_word(sent, stored_digest, day_rows):
+    payload = _message_payload()
+    payload["entry"][0]["changes"][0]["value"]["messages"][0] = {
+        "id": "wamid.TAP",
+        "from": "923001234567",
+        "type": "interactive",
+        "interactive": {"type": "button_reply", "button_reply": {"id": "today", "title": "Today"}},
+    }
+    raw, sig = _signed(payload)
+    app.handle_event(raw, sig)
+    assert sent[0][1].startswith("*Islamabad — ")
+    assert "Sun 6 Sep onwards" not in sent[0][1]  # a day, not the week
+
+
+def test_the_button_titles_are_words_the_parser_knows():
+    """The tap comes back as the title; if a title stops parsing, taps go to NOT_UNDERSTOOD."""
+    today = date(2026, 9, 6)
+    kinds = {title: intent.parse(title, today=today).kind for _, title in whatsapp.BUTTONS}
+    assert kinds == {"Today": intent.DAY, "Tomorrow": intent.DAY, "This week": intent.WEEK}
+
+
+# -- the first message gets the greeting -------------------------------------
+
+
+@pytest.fixture
+def first_contact(monkeypatch):
+    monkeypatch.setattr(store, "record_contact", lambda wa_id: True)
+
+
+def test_a_first_message_gets_the_greeting_and_nothing_else(sent, stored_digest, first_contact):
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert sent.buttons == [("923001234567", app.GREETING, BUTTON_TITLES)]
+    assert len(sent) == 1
+    assert "Kya Scene Hai?" in app.GREETING
+    assert len(app.GREETING) <= whatsapp.BUTTON_BODY_LIMIT
+
+
+def test_the_second_message_is_answered_normally(sent, stored_digest, monkeypatch):
+    monkeypatch.setattr(store, "record_contact", lambda wa_id: False)
+    raw, sig = _signed(_message_payload(text="ksh"))
+    app.handle_event(raw, sig)
+    assert [b for _, b in sent] == _upcoming()
+
+
+def test_stop_as_a_first_message_is_still_honoured(sent, stored_digest, first_contact, monkeypatch):
+    monkeypatch.setattr(store, "opt_out", lambda wa_id: None)
+    raw, sig = _signed(_message_payload(text="STOP"))
+    app.handle_event(raw, sig)
+    assert [b for _, b in sent] == [app.OPT_OUT_REPLY]
+
+
+def test_a_failed_contact_write_means_not_first(sent, stored_digest, monkeypatch):
+    """A Turso blip costs a greeting, never produces a duplicate one."""
+
+    def boom(wa_id):
+        raise RuntimeError("turso down")
+
+    monkeypatch.setattr(store, "record_contact", boom)
+    raw, sig = _signed(_message_payload(text="what's on"))
+    app.handle_event(raw, sig)
+    assert app.GREETING not in [b for _, b in sent]
+
+
+def test_record_contact_reports_the_first_message(monkeypatch):
+    monkeypatch.setattr(store, "query", lambda sql, args=None: [["1"]])
+    assert store.record_contact("923001234567") is True
+    monkeypatch.setattr(store, "query", lambda sql, args=None: [["7"]])
+    assert store.record_contact("923001234567") is False
+    assert "RETURNING message_count" in store.RECORD_CONTACT_SQL
+
+
+def test_the_greeting_words_are_recognised():
+    assert intent.parse("KSH", today=date(2026, 9, 6)).kind == intent.WEEK
+    assert intent.parse("What's on tonight?", today=date(2026, 9, 6)).day == date(2026, 9, 6)
 
 
 def test_day_queries_do_not_count_as_consent(sent, stored_digest, day_rows, writes):
@@ -1140,6 +1314,41 @@ def test_a_forwarded_photo_says_it_cannot_read_it(sent, stored_digest, intake):
     app.handle_event(raw, sig)
     assert intake == []
     assert sent == [(CURATOR, app.INSERT_NO_TEXT)]
+
+
+POST_LINK = "https://www.instagram.com/p/DcL_UC2inUx/?utm_source=ig_web_copy_link"
+
+
+def test_a_curators_instagram_link_is_queued(sent, stored_digest, intake):
+    """The share button sends plain text, not a forward, so the link is the signal."""
+    raw, sig = _signed(_message_payload(text=f" {POST_LINK} ", sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == [(CURATOR, POST_LINK)]
+    assert "Saved" in sent[0][1]
+
+
+def test_a_strangers_instagram_link_is_not(sent, stored_digest, intake):
+    raw, sig = _signed(_message_payload(text=POST_LINK, sender="923009999999"))
+    app.handle_event(raw, sig)
+    assert intake == []
+    assert sent[0][1] == app.NOT_UNDERSTOOD
+
+
+def test_a_link_inside_a_sentence_is_a_question_not_a_submission(sent, stored_digest, intake):
+    raw, sig = _signed(_message_payload(text=f"is this on? {POST_LINK}", sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert intake == []
+
+
+def test_the_bots_post_pattern_matches_the_pipelines():
+    """Two copies of one regex; the bot cannot import the pipeline's."""
+    from isb_events.sources import instagram
+
+    for url in (POST_LINK, "https://instagram.com/reel/abc-123/", "http://www.instagram.com/p/x"):
+        assert app._is_post_link(url) == (instagram.canonical_url(url) is not None)
+    for url in ("https://instagram.com/somebody/", "https://example.com/p/x/"):
+        assert not app._is_post_link(url)
+        assert instagram.canonical_url(url) is None
 
 
 def test_a_message_with_no_context_is_not_a_forward():

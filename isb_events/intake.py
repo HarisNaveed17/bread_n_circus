@@ -17,7 +17,7 @@ from datetime import datetime
 
 from .extract import extract
 from .models import KARACHI, Event
-from .sources import whatsapp
+from .sources import instagram, whatsapp
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -28,9 +28,18 @@ MAX_PER_RUN = 25
 
 
 def _listing_for(row: dict):
-    """Build a `Listing` from a queued row, by channel."""
+    """Build a `Listing` from a queued row, by channel and by shape.
+
+    A WhatsApp row whose whole body is one Instagram post URL is a shared
+    link, not a listing: the caption is on the post, so it is fetched from
+    there (`sources/instagram.py`) rather than handing the model a bare URL to
+    decline. Anything else from WhatsApp is the text itself.
+    """
     received = datetime.fromisoformat(row["received_at"]).astimezone(KARACHI).date()
     if row["channel"] == "whatsapp":
+        tokens = (row["body"] or "").split()
+        if len(tokens) == 1 and instagram.canonical_url(tokens[0]):
+            return instagram.fetch_listing(tokens[0])
         return whatsapp.listing_from_message(row["body"], received_at=received)
     log.warning("intake: no adapter for channel %r", row["channel"])
     return None
@@ -52,7 +61,9 @@ def drain(store: Store, *, client=None, limit: int = MAX_PER_RUN) -> list[Event]
     for row in rows:
         listing = _listing_for(row)
         if listing is None:
-            store.mark_intake_processed(row["id"], decline_reason="no_adapter")
+            # No adapter for the channel, an empty body, or a post that could
+            # not be fetched. None of those change on a retry.
+            store.mark_intake_processed(row["id"], decline_reason="no_listing")
             continue
         event = extract(listing, client=client)
         if event is None:

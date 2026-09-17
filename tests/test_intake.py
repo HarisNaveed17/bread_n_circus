@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pytest
 
-from isb_events.extract import Extraction
+from isb_events.extract import Extraction, Listing
 from isb_events.intake import drain
 from isb_events.models import KARACHI
 from isb_events.store import Store
@@ -116,7 +116,50 @@ def test_an_unknown_channel_is_dropped_not_retried(store):
     assert drain(store, client=_FakeClient(GOOD)) == []
     assert store.pending_intake() == []
     row = store._conn.execute("SELECT decline_reason FROM intake").fetchone()
-    assert row[0] == "no_adapter"
+    assert row[0] == "no_listing"
+
+
+# -- a shared Instagram link is fetched, not parsed as text -------------------
+
+POST = "https://www.instagram.com/p/DcL_UC2inUx/?utm_source=ig_web_copy_link"
+
+
+def test_an_instagram_link_is_fetched_from_the_post(store, monkeypatch):
+    """The share button sends a bare URL; the caption lives on the post."""
+    import isb_events.intake as intake
+
+    fetched = []
+
+    def fake_fetch(url):
+        fetched.append(url)
+        return Listing(text="Chess N' Jams, 12 Sep, 5pm", source="instagram", url=url)
+
+    monkeypatch.setattr(intake.instagram, "fetch_listing", fake_fetch)
+    _queue(store, body=f"  {POST}\n")
+    created = drain(store, client=_FakeClient(GOOD))
+    assert fetched == [POST]
+    assert created[0].sources == ["instagram"]
+    assert created[0].url == POST
+
+
+def test_a_link_with_text_around_it_is_still_a_text_listing(store, monkeypatch):
+    import isb_events.intake as intake
+
+    monkeypatch.setattr(intake.instagram, "fetch_listing", lambda url: 1 / 0)
+    _queue(store, body=f"Chess night! {POST}")
+    created = drain(store, client=_FakeClient(GOOD))
+    assert created[0].sources == ["whatsapp"]
+
+
+def test_an_unreachable_post_leaves_the_queue(store, monkeypatch):
+    import isb_events.intake as intake
+
+    monkeypatch.setattr(intake.instagram, "fetch_listing", lambda url: None)
+    _queue(store, body=POST)
+    assert drain(store, client=_FakeClient(GOOD)) == []
+    assert store.pending_intake() == []
+    row = store._conn.execute("SELECT decline_reason FROM intake").fetchone()
+    assert row[0] == "no_listing"
 
 
 def test_draining_an_empty_queue_calls_nothing(store):

@@ -25,7 +25,8 @@ TOMORROW_WORDS = frozenset({"tomorrow", "tmrw", "tmr"})
 # Asking for the week. A single word is enough when it is unambiguous; the
 # phrases cover the ways people actually ask, since "what's on" tokenises into
 # nothing useful on its own.
-WEEK_WORDS = frozenset({"week", "events", "upcoming", "listings", "lineup"})
+# "ksh" because the greeting tells people to text it: Kya Scene Hai.
+WEEK_WORDS = frozenset({"week", "events", "upcoming", "listings", "lineup", "ksh"})
 WEEK_PHRASES = ("whats on", "what is on", "whats happening", "anything on", "what s on")
 
 WEEK = "week"

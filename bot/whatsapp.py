@@ -20,6 +20,15 @@ log = logging.getLogger(__name__)
 GRAPH_VERSION = "v21.0"
 TIMEOUT = 10.0
 
+# Reply buttons under every reply: (id, title). Three is Meta's maximum for a
+# button message and titles are capped at 20 characters. A tap comes back as an
+# `interactive` message carrying the title, which `intent.parse` reads like
+# typed text — so the ids are informational and the titles are the contract.
+BUTTONS = (("today", "Today"), ("tomorrow", "Tomorrow"), ("week", "This week"))
+# An interactive message's body is capped well below a text message's 4096.
+# Anything longer goes out as text, followed by a short button message.
+BUTTON_BODY_LIMIT = 1024
+
 
 def verify_signature(raw_body: bytes, header: str | None) -> bool:
     """Check Meta's `X-Hub-Signature-256` against the app secret.
@@ -119,9 +128,66 @@ def graph_post(path: str) -> dict:
         return {"error": {"message": f"HTTP {resp.status_code}: {resp.text[:200]}"}}
 
 
+def token_status() -> str:
+    """When does WHATSAPP_TOKEN die? One line, no secret in it.
+
+    The API Setup page hands out 24-hour tokens and does not say so on the way
+    past, so the bot goes quiet a day later with no deploy having changed and
+    nothing in the logs but Graph 190s. This asks Meta directly. A System User
+    token reports `never`; anything with a date is temporary and the answer
+    says how long is left. Surfaced by `?health=` so an external monitor can
+    see EXPIRED or TEMPORARY before a reader sees silence.
+    """
+    import datetime  # noqa: PLC0415 — only this function needs it
+
+    token = os.environ["WHATSAPP_TOKEN"]
+    body = graph_get("debug_token", {"input_token": token, "access_token": token})
+    if "error" in body:
+        return f"REJECTED — {body['error'].get('message')}"
+
+    data = body.get("data") or {}
+    expires = data.get("expires_at")
+    if expires in (0, None):
+        return "valid, never expires (System User token)"
+    when = datetime.datetime.fromtimestamp(expires, datetime.UTC)
+    left = when - datetime.datetime.now(datetime.UTC)
+    hours = left.total_seconds() / 3600
+    if hours < 0:
+        return f"EXPIRED at {when:%Y-%m-%d %H:%M UTC}"
+    return (
+        f"TEMPORARY — expires {when:%Y-%m-%d %H:%M UTC} "
+        f"({hours:.1f}h left). Replace it with a System User token."
+    )
+
+
 def send_text(to: str, body: str) -> dict:
     """Free-form text. Deliverable only inside an open 24-hour service window."""
     return _post({"to": to, "type": "text", "text": {"body": body, "preview_url": False}})
+
+
+def send_buttons(to: str, body: str, buttons: tuple[tuple[str, str], ...] = BUTTONS) -> dict:
+    """Text with tap-to-reply buttons under it. Free inside the service window.
+
+    Same rules as free-form text — a reply, not a template — so it costs
+    nothing and needs no approval. The difference to the reader is that they
+    tap instead of typing, which is the whole point.
+    """
+    return _post(
+        {
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": id_, "title": title}}
+                        for id_, title in buttons
+                    ]
+                },
+            },
+        }
+    )
 
 
 def send_template(to: str, name: str, language: str = "en_US") -> dict:

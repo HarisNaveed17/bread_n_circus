@@ -175,12 +175,15 @@ def pending_intake() -> int:
 # The bot is the only writer: it is the only side that sees inbound messages.
 # `isb_events/store.py` reads them back for the nudge.
 
+# RETURNING so one round trip both records the contact and says whether it is
+# the number's first message — which decides whether they get the greeting.
 RECORD_CONTACT_SQL = """
 INSERT INTO subscribers (wa_id, first_seen, last_seen, message_count)
 VALUES (?, ?, ?, 1)
 ON CONFLICT(wa_id) DO UPDATE SET
     last_seen     = excluded.last_seen,
     message_count = subscribers.message_count + 1
+RETURNING message_count
 """
 
 # Consent is only ever granted explicitly, so opting in clears any earlier STOP
@@ -193,10 +196,15 @@ def _now() -> str:
     return datetime.now(KARACHI).isoformat()
 
 
-def record_contact(wa_id: str) -> None:
-    """Log that someone messaged us. Not consent to message them first."""
+def record_contact(wa_id: str) -> bool:
+    """Log that someone messaged us. Not consent to message them first.
+
+    Returns True when this is the first message ever seen from the number.
+    Turso hands integer cells back as strings, hence the `int()`.
+    """
     now = _now()
-    query(RECORD_CONTACT_SQL, [wa_id, now, now])
+    rows = query(RECORD_CONTACT_SQL, [wa_id, now, now])
+    return bool(rows) and int(rows[0][0] or 0) == 1
 
 
 def opt_in(wa_id: str) -> None:

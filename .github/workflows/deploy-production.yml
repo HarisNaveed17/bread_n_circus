@@ -145,4 +145,8 @@ jobs:
               echo "::error::production is missing env vars or cannot reach Turso." \
                    "It is LIVE in this state — roll back in the Vercel dashboard."
               exit 1 ;;
+            *EXPIRED*|*REJECTED*)
+              echo "::error::Meta rejects WHATSAPP_TOKEN in production. The bot cannot" \
+                   "reply until a System User token is set and redeployed."
+              exit 1 ;;
           esac

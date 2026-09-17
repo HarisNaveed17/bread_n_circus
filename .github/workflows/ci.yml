@@ -212,4 +212,8 @@ jobs:
               echo "::error::the preview cannot reach Turso or is missing env vars." \
                    "Set them for the Preview environment in the Vercel project."
               exit 1 ;;
+            *EXPIRED*|*REJECTED*)
+              echo "::error::Meta rejects WHATSAPP_TOKEN. Generate a System User token" \
+                   "and set it for the Preview environment; the deploy is otherwise fine."
+              exit 1 ;;
           esac

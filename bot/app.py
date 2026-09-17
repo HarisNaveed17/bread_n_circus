@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta
 
 from . import dispatch, intent, store, whatsapp
@@ -16,25 +17,46 @@ from .store import KARACHI
 
 log = logging.getLogger(__name__)
 
-NO_DIGEST_REPLY = (
-    "No digest has been published yet — the week's listings go out on Saturday. "
-    "Message again then and I'll send you what's on."
+# The first message from a number gets this and nothing else. It is the one
+# moment the bot can explain itself; the buttons under it are the "try it".
+GREETING = (
+    "Hello ji! \U0001f440\n\n"
+    "Welcome to *Kya Scene Hai?* Your rundown of everything that's happening in "
+    "Islamabad. Don't want your entire social life to revolve around eating? Just "
+    "text KSH here and it'll give you a summary of everything happening today, "
+    "tomorrow and all of next week. Don't believe us? Text \"What's on tonight?\" "
+    "to try it out."
 )
+# The bot never writes first, so "no digest" means the listings are between
+# refreshes, not that the week has not been published.
+NO_DIGEST_REPLY = (
+    "Nothing to show just now — the listings refresh twice a day. Try again in a few hours."
+)
+# There is no weekly nudge (CLAUDE.md § Delivery, Phase 2). Consent is still
+# recorded so the list exists if one ever ships, but the reply must not
+# promise a message that will not come.
 OPT_IN_REPLY = (
-    "You're subscribed — I'll message you once a week when the new listings are up. "
-    "Reply STOP any time to stop."
+    "Noted — you're on the list for a weekly heads-up if I ever start sending one. "
+    "For now I only reply when you text me, so just message any time. "
+    "Reply STOP if you'd rather not be on the list."
 )
 OPT_OUT_REPLY = (
     "Done — I won't message you first again. "
     "You can still message me any time to get the week's events."
 )
-# Appended to the last message of a full-week reply. Nobody discovers a filter
-# they were never told about, and the alternative — putting it in the stored
-# digest — would bake a bot affordance into text the pipeline also renders for
-# other purposes.
-WEEK_HINT = '_Ask for "today" or "tomorrow" for just that day._'
-NOTHING_ON = "Nothing listed for {when}. Reply *this week* for everything that's on."
+# The body of the button message that follows every listing reply. Short,
+# because the buttons are the content; the text is there because Meta requires
+# a body on an interactive message.
+PICK_BODY = "Pick a view \U0001f447"
+NOTHING_ON = "Nothing listed for {when}."
 DAY_UNAVAILABLE_NOTE = "Here's the whole week instead."
+
+# A bare Instagram post link from a curator is a submission, like a forward.
+# Sharing from the Instagram app sends a plain text message with the URL — not
+# a forward — so without this a curator's share would get "didn't catch that".
+# The pipeline's `sources/instagram.py` has the same pattern; the bot cannot
+# import it, so this is a copy and `tests/test_bot.py` pins the two together.
+INSTAGRAM_POST_RE = re.compile(r"https?://(?:www\.)?instagram\.com/(?:p|reel)/[\w-]+/?(?:\?\S*)?")
 
 # Meta's cap on a text message body.
 WHATSAPP_LIMIT = 4096
@@ -77,7 +99,7 @@ INSERT_NO_TEXT = (
 )
 NOT_UNDERSTOOD = (
     "Ooops, I don't know what you're trying to say there \U0001f440\n\n"
-    "Are you interested in what's on this week? Text *this week* if so!"
+    "Are you interested in what's on? Pick a view below, or text *KSH*."
 )
 INSERT_FAILED = "Couldn't save that one — try again in a minute."
 # Deliberately identical to what a stranger gets for any other message: the
@@ -111,7 +133,7 @@ def handle_health(token: str | None) -> tuple[int, str]:
     lines = [
         f"turso url : {url.split('://')[0] + '://' if '://' in url else 'UNSET'}",
         f"turso token: {'set' if os.environ.get('TURSO_AUTH_TOKEN') else 'MISSING'}",
-        f"wa token  : {'set' if os.environ.get('WHATSAPP_TOKEN') else 'MISSING'}",
+        f"wa token  : {_token_line()}",
         f"wa number : {'set' if os.environ.get('WHATSAPP_PHONE_NUMBER_ID') else 'MISSING'}",
         f"app secret: {'set' if os.environ.get('WHATSAPP_APP_SECRET') else 'MISSING'}",
     ]
@@ -159,6 +181,24 @@ def handle_health(token: str | None) -> tuple[int, str]:
     return 200, "\n".join(lines)
 
 
+def _token_line() -> str:
+    """`set` plus what Meta says about the token's lifetime.
+
+    "set" alone was the one line in `?health=` that could be green while the
+    bot was dead: a 24-hour token from the API Setup page is set right up until
+    it is not. Asking Meta costs one Graph call, and it means an external
+    monitor polling this endpoint sees EXPIRED (or TEMPORARY, with hours left)
+    before a reader sees silence. A Graph outage must not fail the health
+    check for that, so it degrades to "could not check".
+    """
+    if not os.environ.get("WHATSAPP_TOKEN"):
+        return "MISSING"
+    try:
+        return f"set — {whatsapp.token_status()}"
+    except Exception as exc:
+        return f"set — could not check ({type(exc).__name__})"
+
+
 def handle_event(raw_body: bytes, signature: str | None) -> tuple[int, str]:
     """POST: an inbound webhook event.
 
@@ -191,7 +231,15 @@ def handle_event(raw_body: bytes, signature: str | None) -> tuple[int, str]:
 
 
 def _body_text(message: dict) -> str:
-    """The message text, or "" for stickers, images and everything else."""
+    """The message text, or "" for stickers, images and everything else.
+
+    A tapped reply button arrives as an `interactive` message carrying the
+    button's title. The title is one of the words `intent.parse` already
+    understands, so a tap is handled exactly as if it had been typed.
+    """
+    if message.get("type") == "interactive":
+        reply = (message.get("interactive") or {}).get("button_reply") or {}
+        return reply.get("title") or ""
     return (message.get("text") or {}).get("body") or ""
 
 
@@ -200,23 +248,29 @@ def _handle_message(message: dict) -> None:
     log.info("bot: inbound %s message from %s", message.get("type", "?"), sender)
 
     # Best-effort: a bookkeeping failure must never cost someone their reply.
+    # It also says whether this is the number's first message, which decides
+    # whether they get the greeting; a failed write means "not first", so a
+    # Turso blip costs a greeting rather than producing a duplicate one.
+    first = False
     try:
-        store.record_contact(sender)
+        first = bool(store.record_contact(sender))
     except Exception:
         log.exception("bot: could not record contact for %s", sender)
 
     body = _body_text(message)
     word = body.strip().lower()
+    curator = _wa_id(sender) in _curators()
 
     # A forward carries `context.forwarded` and nothing else; a normal message
     # has no `context` at all. Confirmed against a real forward on 2026-09-17 —
     # see CLAUDE.md § Intake. WhatsApp gives you no way to add a prefix to a
-    # forward, so for a curator the forward *is* the submission.
-    if _is_forwarded(message) and _wa_id(sender) in _curators():
-        _handle_insert(sender, body.strip(), forwarded=True)
+    # forward, so for a curator the forward *is* the submission. A bare
+    # Instagram link is one too: the share button sends plain text.
+    if curator and (_is_forwarded(message) or _is_post_link(body)):
+        _handle_insert(sender, body.strip(), forwarded=_is_forwarded(message))
         return
 
-    if word.startswith(INSERT_PREFIX):
+    if curator and word.startswith(INSERT_PREFIX):
         _handle_insert(sender, body.strip()[len(INSERT_PREFIX) :].strip())
         return
 
@@ -225,13 +279,27 @@ def _handle_message(message: dict) -> None:
         whatsapp.send_text(sender, OPT_OUT_REPLY)
         return
 
+    # A first message gets the greeting and nothing else — whatever it said.
+    # The greeting explains what to text and carries the buttons, so the
+    # sender's second message is the one that gets answered.
+    if first:
+        log.info("bot: first contact from %s; sending the greeting", sender)
+        _send_with_buttons(sender, GREETING)
+        return
+
     if word in OPT_IN_WORDS:
         store.opt_in(sender)
         whatsapp.send_text(sender, OPT_IN_REPLY)
         _send_upcoming(sender)
         return
 
-    _reply(sender, intent.parse(_body_text(message), today=_today()))
+    _reply(sender, intent.parse(body, today=_today()))
+
+
+def _is_post_link(body: str) -> bool:
+    """Is the whole message one Instagram post URL?"""
+    tokens = body.split()
+    return len(tokens) == 1 and INSTAGRAM_POST_RE.fullmatch(tokens[0]) is not None
 
 
 def _wa_id(number: str) -> str:
@@ -299,7 +367,7 @@ def _today() -> date:
 def _reply(to: str, wanted: intent.Filter) -> None:
     if wanted.kind == intent.UNKNOWN:
         log.info("bot: nothing recognised in a message from %s", to)
-        whatsapp.send_text(to, NOT_UNDERSTOOD)
+        _send_with_buttons(to, NOT_UNDERSTOOD)
         return
     if wanted.kind == intent.WEEK:
         _send_upcoming(to)
@@ -325,7 +393,7 @@ def _send_upcoming(to: str) -> None:
 
     if not rows:
         log.info("bot: nothing upcoming for %s", to)
-        whatsapp.send_text(to, NOTHING_UPCOMING.format(days=UPCOMING_DAYS))
+        _send_with_buttons(to, NOTHING_UPCOMING.format(days=UPCOMING_DAYS))
         return
 
     cut = max(0, len(rows) - MAX_UPCOMING)
@@ -340,8 +408,7 @@ def _send_upcoming(to: str) -> None:
     header = f"*Islamabad — {days[0][0]} onwards*"
     note = f"…and {cut} more not shown." if cut else ""
     log.info("bot: sending %d upcoming event(s) to %s", len(rows), to)
-    for part in _with_hint(_pack_days(header, days, note)):
-        whatsapp.send_text(to, part)
+    _send_parts(to, _pack_days(header, days, note))
 
 
 def _pack_days(header: str, days: list[tuple[str, list[str]]], note: str = "") -> list[str]:
@@ -383,14 +450,13 @@ def _send_day(to: str, wanted: intent.Filter) -> None:
 
     if not rows:
         log.info("bot: nothing on %s for %s", wanted.day, to)
-        whatsapp.send_text(to, NOTHING_ON.format(when=wanted.label))
+        _send_with_buttons(to, NOTHING_ON.format(when=wanted.label))
         return
 
     label = rows[0][0]
     parts = _pack_day(label, [block for _, block in rows])
     log.info("bot: sending %d event(s) for %s to %s", len(rows), wanted.day, to)
-    for part in parts:
-        whatsapp.send_text(to, part)
+    _send_parts(to, parts)
 
 
 def _pack_day(label: str, blocks: list[str]) -> list[str]:
@@ -424,20 +490,30 @@ def _send_digest(to: str) -> None:
         # Reads the store successfully and finds nothing: either the cron has
         # not run, or this deployment is pointed at the wrong database.
         log.warning("bot: no digest stored; replying with the placeholder to %s", to)
-        whatsapp.send_text(to, NO_DIGEST_REPLY)
+        _send_with_buttons(to, NO_DIGEST_REPLY)
         return
     log.info("bot: sending digest (%d message(s)) to %s", len(parts), to)
-    for part in _with_hint(parts):
-        whatsapp.send_text(to, part)
+    _send_parts(to, parts)
 
 
-def _with_hint(parts: list[str]) -> list[str]:
-    """Append the day-filter hint to the last message, if it fits.
+def _send_parts(to: str, parts: list[str]) -> None:
+    """A listing reply: the text messages, then the buttons.
 
-    Only the default reply carries it: someone who already asked for "today"
-    does not need telling that "today" works.
+    The buttons ride on a separate, short message rather than on the last part
+    because an interactive body is capped at 1024 characters and a day's
+    listings are routinely longer. Every listing reply ends this way — after
+    "today", the buttons offer tomorrow and the week, which is the next thing
+    a reader wants without having to know what to type.
     """
-    hint = f"\n\n{WEEK_HINT}"
-    if parts and len(parts[-1]) + len(hint) <= WHATSAPP_LIMIT:
-        parts = [*parts[:-1], parts[-1] + hint]
-    return parts
+    for part in parts:
+        whatsapp.send_text(to, part)
+    whatsapp.send_buttons(to, PICK_BODY)
+
+
+def _send_with_buttons(to: str, text: str) -> None:
+    """A short reply with the buttons under it, in one message when it fits."""
+    if len(text) <= whatsapp.BUTTON_BODY_LIMIT:
+        whatsapp.send_buttons(to, text)
+        return
+    whatsapp.send_text(to, text)
+    whatsapp.send_buttons(to, PICK_BODY)
