@@ -27,6 +27,11 @@ on:
         description: "Monday of the target week (YYYY-MM-DD). Blank = this week and the next."
         required: false
         type: string
+      skip_fetch:
+        description: "Skip the scrape: just drain forwarded listings and re-render."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: weekly-digest
@@ -49,6 +54,10 @@ jobs:
       # Read via the environment, never interpolated into a run block —
       # `${{ inputs.* }}` inline in a shell script is a script-injection hole.
       WEEK_OF: ${{ inputs.week_of }}
+      # The bot sets this when a curator forwards a listing: drain the queue and
+      # re-render, without asking every source for a fresh scrape. See the
+      # render step below.
+      SKIP_FETCH: ${{ inputs.skip_fetch }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,12 +95,17 @@ jobs:
         # matters now the cron runs daily: `coming_week` is next week from
         # Tuesday on, so rendering only that would leave today's and tomorrow's
         # listings — what the bot's day views read — frozen until Monday.
+        #
+        # `--no-fetch` is the curator path: a forwarded listing has to reach the
+        # digest in minutes, and re-scraping every source to publish one event
+        # is what would rate-limit theblackhole.pk. The scheduled runs keep the
+        # scraped sources current; this only adds what was just handed to us.
         run: |
-          if [ -n "$WEEK_OF" ]; then
-            uv run isb-events render --week-of "$WEEK_OF"
-          else
-            uv run isb-events render
-          fi
+          args=()
+          if [ -n "$WEEK_OF" ]; then args+=(--week-of "$WEEK_OF"); fi
+          if [ "$SKIP_FETCH" = "true" ]; then args+=(--no-fetch); fi
+          echo "render ${args[*]:-(no arguments)}"
+          uv run isb-events render ${args[@]+"${args[@]}"}
 
       - name: Check the store and show the digest in the run summary
         # `isb-events check` reads the store back the way the bot will and

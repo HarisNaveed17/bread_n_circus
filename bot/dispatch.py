@@ -7,11 +7,15 @@ until the evening run, which lands near midnight. A `workflow_dispatch` is the
 only trigger that is actually prompt, and it has to come from something that is
 always on. That is the bot.
 
-**Why it batches rather than firing per listing.** Each run scrapes every
-source, and theblackhole.pk answers a rate limit with an empty HTTP 200 —
-the failure that silently emptied six digests. Five forwards firing five runs
-would be ten fetches at that source in minutes. One run for five listings is
-both cheaper and safer, and the cooldown below is the second guard.
+**Why every listing fires a run, and why that is cheap.** Batching to five was
+wrong: by the time a fifth listing arrives the first one's event can be the
+same evening. What made batching look necessary was that a run scraped every
+source, and theblackhole.pk answers a rate limit with an empty HTTP 200 — the
+failure that silently emptied six digests. So the run the bot asks for now
+carries `skip_fetch`, and `isb-events render --no-fetch` drains the queue and
+re-renders from the store without touching a source at all. Scraping stays on
+the schedule, where it belongs; a forward costs one Actions run and one
+extraction.
 
 **Token scope.** A fine-grained PAT, this repository only, `actions: write` and
 nothing else. It cannot read code, cannot push, cannot touch secrets. It lives
@@ -33,13 +37,19 @@ WORKFLOW = "weekly-digest.yml"
 API = "https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
 TIMEOUT = 10.0
 
-# How many queued listings before a run is worth firing.
-INTAKE_TRIGGER_THRESHOLD = 5
+# How many queued listings before a run is worth firing. One: a listing is no
+# use to a reader while it sits in a queue, and the run it triggers does not
+# scrape, so waiting buys nothing.
+INTAKE_TRIGGER_THRESHOLD = 1
 
 # Never twice inside this window. A webhook can be delivered more than once —
-# Meta retries anything that is not a 2xx — and two curators can cross. Without
-# this, a burst of forwards could fire several overlapping pipeline runs.
-COOLDOWN_SECONDS = 15 * 60
+# Meta retries anything that is not a 2xx — and two curators can cross. It is
+# five minutes rather than fifteen because a no-fetch run is cheap and a
+# listing should not wait a quarter of an hour behind someone else's; it exists
+# to collapse a burst, not to batch. A listing caught by the cooldown is not
+# lost — the run already in flight drains the whole queue, and the next
+# scheduled run would anyway.
+COOLDOWN_SECONDS = 5 * 60
 
 # Process-local, which is the honest scope: Vercel functions are short-lived, so
 # this stops a burst inside one invocation and not much more. The workflow's own
@@ -77,7 +87,12 @@ def fire(*, now: float | None = None) -> bool:
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            json={"ref": os.environ.get("GITHUB_DISPATCH_REF", "master")},
+            # `skip_fetch` goes as a string: the REST API documents input
+            # values as strings and coerces them to the input's declared type.
+            json={
+                "ref": os.environ.get("GITHUB_DISPATCH_REF", "master"),
+                "inputs": {"skip_fetch": "true"},
+            },
             timeout=TIMEOUT,
         )
     except Exception:

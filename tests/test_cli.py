@@ -108,3 +108,73 @@ def test_new_events_still_appear_alongside_stored_ones(tmp_path, monkeypatch):
     source.calls = 0  # fetch again, with something new this time
     out = runner.invoke(app, ["render", "--week-of", "2026-08-24", "--dry-run"]).output
     assert "Calligraphy" in out and "Film Screening" in out
+
+
+# -- --no-fetch: publish a forwarded listing without scraping anything --------
+
+
+def test_no_fetch_publishes_a_queued_listing_without_touching_a_source(tmp_path, monkeypatch):
+    """What a curator's forward triggers.
+
+    Batching to five existed because every run scraped every source, and
+    theblackhole.pk rate-limits. This run does not scrape at all, so there is
+    nothing to save listings up for: one forward, one run, straight into the
+    digest.
+    """
+    import isb_events.intake as intake_module
+    from isb_events.store import Store
+
+    monkeypatch.setenv("ISB_DB_PATH", str(tmp_path / "test.db"))
+    source = _Source([_event("Calligraphy", 25)])
+    monkeypatch.setattr(pipeline, "load_enabled_sources", lambda: [source])
+
+    # One scheduled run puts a scraped event in the store.
+    assert runner.invoke(app, ["render", "--week-of", "2026-08-24"]).exit_code == 0
+    assert source.calls == 1
+
+    # A curator forwards a listing; the bot queues it.
+    with Store.open() as store:
+        store._conn.execute(
+            "INSERT INTO intake (id, channel, sender, body, received_at) VALUES (?,?,?,?,?)",
+            (
+                "i1",
+                "whatsapp",
+                "923001234567",
+                "Open Mic, 26 Aug, 8pm",
+                "2026-08-25T13:00:00+05:00",
+            ),
+        )
+        store._conn.commit()
+
+    monkeypatch.setattr(
+        intake_module, "extract", lambda listing, client=None: _event("Open Mic", 26)
+    )
+    result = runner.invoke(app, ["render", "--week-of", "2026-08-24", "--no-fetch"])
+    assert result.exit_code == 0, result.output
+    assert source.calls == 1, "a forwarded listing must not cost a scrape of every source"
+
+    shown = runner.invoke(app, ["send", "--week-of", "2026-08-24", "--dry-run"]).output
+    assert "Open Mic" in shown, "the forwarded listing is in the digest"
+    assert "Calligraphy" in shown, "and the scraped events are still there"
+
+
+def test_no_fetch_refuses_to_publish_an_empty_digest_over_a_good_one(tmp_path, monkeypatch):
+    """With no fetch there is nothing to fall back to, so a bad read must not write."""
+    from isb_events.store import Store
+
+    monkeypatch.setenv("ISB_DB_PATH", str(tmp_path / "test.db"))
+    source = _Source([_event("Calligraphy", 25)])
+    monkeypatch.setattr(pipeline, "load_enabled_sources", lambda: [source])
+    assert runner.invoke(app, ["render", "--week-of", "2026-08-24"]).exit_code == 0
+
+    def boom(self, window):
+        raise RuntimeError("turso timed out")
+
+    monkeypatch.setattr(Store, "events_in_window", boom)
+    result = runner.invoke(app, ["render", "--week-of", "2026-08-24", "--no-fetch"])
+    assert result.exit_code != 0
+
+    monkeypatch.undo()
+    monkeypatch.setenv("ISB_DB_PATH", str(tmp_path / "test.db"))
+    shown = runner.invoke(app, ["send", "--week-of", "2026-08-24", "--dry-run"]).output
+    assert "Calligraphy" in shown, "the good digest survived"

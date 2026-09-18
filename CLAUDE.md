@@ -348,9 +348,10 @@ stores it; the next pipeline run extracts it. Migration `004_intake.sql`.
 ```
 curator ──"/insert …"──> webhook ──> intake (queued)
                             │
-                            └── 5 pending? ──> POST workflow_dispatch
+                            └── POST workflow_dispatch (skip_fetch=true)
                                                       │
-                          pipeline: drain ──> extract ──> events ──> digest
+                     pipeline: drain ──> extract ──> events ──> digest
+                     (no scrape: `render --no-fetch`)
 ```
 
 **A curator's forward *is* the submission — no keyword.** WhatsApp gives you
@@ -402,17 +403,32 @@ trigger, and the bot is the only thing always on. The token is a fine-grained
 PAT, this repo, `actions: write`, nothing else, and it lives in Vercel. Unset,
 everything no-ops and listings wait for the schedule — intake still works.
 
-**Why it batches at five rather than firing per listing.** Every run scrapes
-every source, and theblackhole.pk answers a rate limit with an empty HTTP 200 —
-the failure that silently emptied six digests (§ Render from the store). Five
-forwards firing five runs would be ten fetches there in minutes. A 15-minute
-cooldown is the second guard; the workflow's own `concurrency` group is the
-third.
+**Every listing fires a run, and the run does not scrape** (changed
+2026-09-18; it batched at five until then). Batching was the wrong trade: by
+the time a fifth listing arrives, the first one's event can be that same
+evening. What made batching look necessary was that a run scraped every
+source, and theblackhole.pk answers a rate limit with an empty HTTP 200 — the
+failure that silently emptied six digests (§ Render from the store).
+
+So the cost was removed instead of the frequency. The dispatch carries
+`skip_fetch=true`, and `isb-events render --no-fetch` drains the queue and
+re-renders from the store without touching a source at all. Scraping stays on
+the schedule, where the rate limit is not a problem; a forward costs one
+Actions run and one extraction. Note this only works *because* the digest
+renders from the store — a no-fetch run has the full picture already.
+
+Two consequences. `_events_for` takes `fetched=False` on that path and
+**re-raises a failed store read instead of falling back to the fetch**: the
+fetch is empty by construction, so falling back would overwrite a good digest
+with "no events found". And the cooldown is now 5 minutes rather than 15 — it
+exists to collapse a burst, not to batch, and a listing it catches is not lost
+because the run already in flight drains the whole queue.
 
 **Every row leaves the queue, extracted or not.** A declined listing left
 pending would be re-extracted on every run forever — re-paying for the same
-refusal, and holding the pending count above the dispatch threshold so that
-*every* subsequent curator message fires a pipeline run.
+refusal. (It also used to hold the pending count above the old batch threshold
+so that every later curator message fired a run; the threshold is 1 now, but
+the re-payment argument stands on its own.)
 
 Two things this turned up that were not obvious:
 

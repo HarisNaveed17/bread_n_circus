@@ -19,7 +19,7 @@ from .intake import drain
 from .models import KARACHI, DigestWindow, Event
 from .normalize import dedupe
 from .notify.base import DryRunNotifier, Notifier
-from .pipeline import run_fetch
+from .pipeline import FetchResult, run_fetch
 from .render import event_blocks
 from .render import render as render_events
 from .store import Store
@@ -28,6 +28,11 @@ app = typer.Typer(add_completion=False, help="Islamabad weekly event digest.")
 
 WeekOpt = typer.Option(None, "--week-of", help="Monday of the target week (YYYY-MM-DD).")
 DryRunOpt = typer.Option(False, "--dry-run", help="Print instead of persisting/sending.")
+NoFetchOpt = typer.Option(
+    False,
+    "--no-fetch",
+    help="Skip the scrape: drain forwarded listings and re-render from the store.",
+)
 
 
 def _window(week_of: str | None) -> DigestWindow:
@@ -78,7 +83,7 @@ def _drain_intake(store: Store) -> None:
         typer.echo(f"intake: {len(created)} forwarded listing(s) became events")
 
 
-def _events_for(window: DigestWindow, store: Store, result) -> list[Event]:
+def _events_for(window: DigestWindow, store: Store, result, *, fetched: bool = True) -> list[Event]:
     """What the digest should show: everything stored for the week, deduped.
 
     Not `result.events`. A fetch is one sample — theblackhole.pk answers a rate
@@ -87,11 +92,16 @@ def _events_for(window: DigestWindow, store: Store, result) -> list[Event]:
     the store back makes a failed fetch mean "nothing new", not "nothing at all".
 
     Falls back to the fetch if the store read fails, so a broken query degrades
-    to the old behaviour rather than to an empty digest.
+    to the old behaviour rather than to an empty digest — but only when there
+    was a fetch. On a `--no-fetch` run `result` is empty by construction, so
+    falling back would overwrite a good digest with "no events found". There
+    the read failure is fatal and the run stops with nothing written.
     """
     try:
         stored = store.events_in_window(window)
     except Exception:
+        if not fetched:
+            raise
         logging.getLogger(__name__).exception("could not read stored events; using the fetch")
         return result.events
     return dedupe(stored)
@@ -135,16 +145,23 @@ def fetch(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
 
 
 @app.command()
-def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
+def render(week_of: str = WeekOpt, dry_run: bool = DryRunOpt, no_fetch: bool = NoFetchOpt) -> None:
     """Render stored events into the `digests` row.
 
     With no `--week-of`, refreshes both the current week and the coming one.
+
+    `--no-fetch` skips the scrape and renders what is already stored, after
+    draining the intake queue. That is what a curator's forward triggers: the
+    listing has to reach the digest within minutes, and re-scraping every
+    source to publish one forwarded event is both pointless and the thing that
+    rate-limits theblackhole.pk. The scheduled runs are what keep the scraped
+    sources current; this path only adds what a person just handed us.
     """
     with Store.open() as store:
         _drain_intake(store)
         for window in _windows(week_of):
-            result = run_fetch(window, store)
-            events = _events_for(window, store, result)
+            result = FetchResult() if no_fetch else run_fetch(window, store)
+            events = _events_for(window, store, result, fetched=not no_fetch)
             messages = render_events(events, window)
             for line in result.footer_lines():
                 messages[-1] += f"\n{line}"

@@ -1177,18 +1177,33 @@ def test_a_curator_can_still_ask_what_is_on(sent, stored_digest, intake):
     assert UPCOMING_REPLY in sent[0][1]
 
 
-def test_the_digest_run_fires_once_the_threshold_is_reached(
-    sent, stored_digest, intake, monkeypatch
-):
+def test_the_very_first_listing_fires_a_run(sent, stored_digest, intake, monkeypatch):
+    """Waiting for a fifth listing can mean publishing the first one too late.
+
+    The run it asks for does not scrape (`skip_fetch`), so there is nothing to
+    save up for.
+    """
     fired = []
-    monkeypatch.setattr(app.dispatch, "should_fire", lambda pending: pending >= 5)
+    # The `intake` fixture stubs this off; put the real threshold rule back.
+    monkeypatch.setattr(
+        app.dispatch,
+        "should_fire",
+        lambda pending: pending >= app.dispatch.INTAKE_TRIGGER_THRESHOLD,
+    )
     monkeypatch.setattr(app.dispatch, "fire", lambda: fired.append(True) or True)
-    for n in range(5):
-        raw, sig = _signed(_message_payload(text=f"{LISTING} {n}", sender=CURATOR))
-        app.handle_event(raw, sig)
-    assert len(fired) == 1, "should fire exactly once, on the fifth"
-    assert "updating the listings now" in sent[-1][1]
-    assert "Saved" in sent[0][1] and "updating" not in sent[0][1]
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert len(fired) == 1, "one forwarded listing is enough"
+    assert sent[0][1] == app.INSERT_SOON
+
+
+def test_a_listing_inside_the_cooldown_still_gets_saved(sent, stored_digest, intake, monkeypatch):
+    """The run already in flight drains the whole queue, so nothing is lost."""
+    monkeypatch.setattr(app.dispatch, "should_fire", lambda pending: False)
+    raw, sig = _signed(_message_payload(text=LISTING, sender=CURATOR))
+    app.handle_event(raw, sig)
+    assert len(intake) == 1
+    assert sent[0][1] == app.INSERT_SAVED
 
 
 def test_a_failed_dispatch_still_confirms_the_save(sent, stored_digest, intake, monkeypatch):
@@ -1212,12 +1227,49 @@ def test_dispatch_is_inert_without_configuration(monkeypatch):
     assert app.dispatch.should_fire(99) is False
 
 
-def test_dispatch_needs_the_threshold(monkeypatch):
+def test_one_queued_listing_is_enough(monkeypatch):
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
     monkeypatch.setenv("GITHUB_REPO", "o/r")
     monkeypatch.setattr(app.dispatch, "_last_fired", 0.0)
-    assert app.dispatch.should_fire(4, now=10_000) is False
-    assert app.dispatch.should_fire(5, now=10_000) is True
+    assert app.dispatch.should_fire(0, now=10_000) is False
+    assert app.dispatch.should_fire(1, now=10_000) is True
+
+
+def test_the_dispatch_asks_for_a_run_that_does_not_scrape(monkeypatch):
+    """A forward must not cost a scrape of every source — that is what batching was for."""
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
+    monkeypatch.setenv("GITHUB_REPO", "o/r")
+    monkeypatch.setattr(app.dispatch, "_last_fired", 0.0)
+    captured = {}
+
+    class _Resp:
+        status_code = 204
+
+    def fake_post(url, **kw):
+        captured["url"] = url
+        captured["json"] = kw["json"]
+        return _Resp()
+
+    monkeypatch.setattr(app.dispatch.httpx, "post", fake_post)
+    assert app.dispatch.fire(now=1.0) is True
+    assert captured["url"].endswith("/actions/workflows/weekly-digest.yml/dispatches")
+    assert captured["json"]["inputs"] == {"skip_fetch": "true"}
+    # Strings only: the REST API rejects a JSON boolean for a workflow input.
+    assert all(isinstance(v, str) for v in captured["json"]["inputs"].values())
+
+
+def test_the_workflow_accepts_the_input_the_bot_sends(monkeypatch):
+    """The bot names an input; the workflow has to declare it, or GitHub 422s."""
+    import yaml
+
+    workflow = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / ".github/workflows/weekly-digest.yml").read_text()
+    )
+    # `on:` parses as the boolean True in YAML 1.1, which is why this is not `["on"]`.
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    declared = triggers["workflow_dispatch"]["inputs"]
+    assert "skip_fetch" in declared
+    assert declared["skip_fetch"]["default"] is False
 
 
 def test_dispatch_respects_the_cooldown(monkeypatch):

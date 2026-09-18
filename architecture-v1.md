@@ -54,7 +54,7 @@ flowchart LR
     P -- reads --> I
     C -. ping on success .-> HB
     W -- Turso HTTP API --> DE & D & S & I
-    W -- "workflow_dispatch<br/>(5 queued listings)" --> P
+    W -- "workflow_dispatch<br/>(per listing, skip_fetch)" --> P
     R <-- text --> META <-- webhook / reply --> W
     CU -- forwards a listing --> META
 ```
@@ -153,13 +153,14 @@ sequenceDiagram
     W->>W: message.context.forwarded and sender in CURATORS?
     W->>DB: INSERT intake (id = sha256(body)) — duplicates collapse
     W->>DB: COUNT pending
-    alt 5 or more pending, and no dispatch in the last 15 min
-        W->>GH: POST workflow_dispatch → run now
-        W-->>CU: "Saved — updating the listings now"
+    alt nothing dispatched in the last 5 min
+        W->>GH: POST workflow_dispatch, skip_fetch=true
+        W-->>CU: "Saved — I'm pulling the details out now"
+        GH->>DB: render --no-fetch: drain, extract, re-render. No scrape.
     else
-        W-->>CU: "Saved — N waiting to be processed"
+        W-->>CU: "Saved — it'll show up at the next refresh"
     end
-    Note over GH,DB: next render drains the queue (workflow 1)
+    Note over GH,DB: either way the next render drains the queue (workflow 1)
 ```
 
 The bot stores; the pipeline parses. The `CURATORS` allowlist is the security
@@ -214,7 +215,7 @@ Three layers, cheapest first, each catching what the one before cannot:
 | `isb_events/render.py` | Pure: events → WhatsApp text, and `event_blocks()` for the per-event rows. | No Markdown, no escaping, URLs on their own line. Only place that formats an event. |
 | `isb_events/store.py` | sqlite/libSQL wrapper, migrations on every open. | Qmark binds and tuple rows only — both backends; `tests/test_store.py` runs everything on both. |
 | `isb_events/check.py` | Reads the store back and lists what has gone quiet. | Pure over the store; the CLI decides exit status. |
-| `isb_events/cli.py` | Typer: `fetch`, `render`, `send`, `run`, `check`. | `render` writes `digests` and `digest_events`; nothing else does. |
+| `isb_events/cli.py` | Typer: `fetch`, `render`, `send`, `run`, `check`. | `render` writes `digests` and `digest_events`; nothing else does. `render --no-fetch` is the curator path: drain and re-render, no scrape. |
 | `isb_events/notify/` | The `Notifier` seam for the Phase 2 nudge. Only `DryRunNotifier` exists. | — |
 | `migrations/` | `001`–`004`, replayed on every `Store.open()`. | Every statement must be idempotent. Only the pipeline applies them; the bot's `?health=` reports a table it cannot find. |
 | `sources.yaml` | Which scrapers are on. | Enabling a source is data, not code. |

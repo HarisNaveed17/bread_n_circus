@@ -84,11 +84,10 @@ OPT_IN_WORDS = {"subscribe", "start", "join"}
 # from a curator", because curators also just ask what's on.
 INSERT_PREFIX = "/insert"
 
-INSERT_SAVED = (
-    "Saved — I'll pull the details out of that and it'll show up in the listings. "
-    "{pending} waiting to be processed."
+INSERT_SAVED = "Saved — I'll pull the details out of that and it'll show up at the next refresh."
+INSERT_SOON = (
+    "Saved — I'm pulling the details out now, so it'll be in the listings in a few minutes."
 )
-INSERT_SOON = "Saved — that's {pending}, so I'm updating the listings now. Give it a few minutes."
 INSERT_EMPTY = "Send the listing text after /insert and I'll add it."
 # A forwarded photo is the obvious next thing a curator will try. Flyer intake
 # needs the bot to download media bytes at receipt, because Meta's media URLs
@@ -354,9 +353,9 @@ def _handle_insert(sender: str, listing: str, *, forwarded: bool = False) -> Non
 
     log.info("bot: queued a listing from %s; %d pending", sender, pending)
     if dispatch.should_fire(pending) and dispatch.fire():
-        whatsapp.send_text(sender, INSERT_SOON.format(pending=pending))
+        whatsapp.send_text(sender, INSERT_SOON)
         return
-    whatsapp.send_text(sender, INSERT_SAVED.format(pending=pending))
+    whatsapp.send_text(sender, INSERT_SAVED)
 
 
 def _today() -> date:

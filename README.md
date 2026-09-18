@@ -22,6 +22,7 @@ uv run isb-events run --dry-run --week-of 2026-08-24
 |----------|---------------------------------------------------|
 | `fetch`  | Scrape enabled sources into the store             |
 | `render` | Render stored events into the `digests` row (this week + next) |
+| `render --no-fetch` | Same, minus the scrape: drain forwarded listings and re-render |
 | `send`   | Print the stored digest (`--dry-run`); no push channel yet |
 | `run`    | `fetch` → `render` → `send` in one shot           |
 | `check`  | Read the store back and exit 1 if the data says the pipeline has stopped |
@@ -103,6 +104,12 @@ is best-effort and drops firings; running twice a day means a missed one costs
 hours rather than a week. Re-running is safe — events upsert by id, and
 `dedupe` merges a listing that was re-published under a new URL.
 
+Needs two repo secrets: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. The job
+fails fast without them rather than silently writing to a throwaway sqlite
+file on the runner. Trigger it by hand from the Actions tab ("Run workflow"),
+optionally passing a `week_of` date; the rendered digest is echoed into the
+run summary either way.
+
 ## Monitoring
 
 The failures this project has had were all silent: a source answering a rate
@@ -147,12 +154,6 @@ cron and one function, with one person, and the questions are "did it run"
 and "did the numbers move". A failed workflow email and a dead man's switch
 answer both for free.
 
-Needs two repo secrets: `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`. The job
-fails fast without them rather than silently writing to a throwaway sqlite
-file on the runner. Trigger it by hand from the Actions tab ("Run workflow"),
-optionally passing a `week_of` date; the rendered digest is echoed into the
-run summary either way.
-
 ## WhatsApp bot (Phase 1)
 
 `bot/` answers inbound WhatsApp messages from the stored digest for the week
@@ -175,6 +176,14 @@ What it understands:
 | `subscribe` / `start` / `join` | Recorded as consent for a future weekly heads-up; the reply says none is sent yet |
 | `stop` / `unsubscribe` / `cancel` | Opt out |
 | a bare Instagram post link, from a curator | Queued for the pipeline, which fetches the post's caption |
+
+A curator's listing triggers a pipeline run immediately rather than waiting
+for the next scheduled one — GitHub's cron lands 2.5-5 hours late, which would
+put a lunchtime forward in the digest near midnight, too late for an event
+that evening. That run carries `skip_fetch`, so it drains the queue and
+re-renders **without scraping any source**; scraping stays on the schedule.
+A 5-minute cooldown collapses a burst, and a listing caught by it is not
+delayed in practice because the run already in flight drains the whole queue.
 
 Every listing reply ends with a short message carrying three reply buttons,
 *Today*, *Tomorrow* and *This week*. Short replies carry the buttons on
