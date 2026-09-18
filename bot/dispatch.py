@@ -87,8 +87,11 @@ def fire(*, now: float | None = None) -> bool:
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
-            # `skip_fetch` goes as a string: the REST API documents input
-            # values as strings and coerces them to the input's declared type.
+            # `skip_fetch` goes as a string: the REST API takes input values as
+            # strings and coerces them to the input's declared type. Verified
+            # against the live API 2026-09-18 — this exact request ran the
+            # workflow as `render --no-fetch`, and both sources' `last_seen`
+            # stayed 12h old, which is the proof nothing was scraped.
             json={
                 "ref": os.environ.get("GITHUB_DISPATCH_REF", "master"),
                 "inputs": {"skip_fetch": "true"},
