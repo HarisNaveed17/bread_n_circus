@@ -1230,7 +1230,7 @@ def test_dispatch_is_inert_without_configuration(monkeypatch):
 def test_one_queued_listing_is_enough(monkeypatch):
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
     monkeypatch.setenv("GITHUB_REPO", "o/r")
-    monkeypatch.setattr(app.dispatch, "_last_fired", 0.0)
+    monkeypatch.setattr(app.dispatch, "_last_fired", None)
     assert app.dispatch.should_fire(0, now=10_000) is False
     assert app.dispatch.should_fire(1, now=10_000) is True
 
@@ -1239,7 +1239,7 @@ def test_the_dispatch_asks_for_a_run_that_does_not_scrape(monkeypatch):
     """A forward must not cost a scrape of every source — that is what batching was for."""
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
     monkeypatch.setenv("GITHUB_REPO", "o/r")
-    monkeypatch.setattr(app.dispatch, "_last_fired", 0.0)
+    monkeypatch.setattr(app.dispatch, "_last_fired", None)
     captured = {}
 
     class _Resp:
@@ -1270,6 +1270,45 @@ def test_the_workflow_accepts_the_input_the_bot_sends(monkeypatch):
     declared = triggers["workflow_dispatch"]["inputs"]
     assert "skip_fetch" in declared
     assert declared["skip_fetch"]["default"] is False
+
+
+def test_a_cold_container_dispatches_on_the_real_clock(monkeypatch):
+    """The 2026-09-21 regression: a fresh container refused to fire.
+
+    `_last_fired` was 0.0, and `time.monotonic()` counts from the container's
+    own boot — so on a Vercel microVM a few seconds old, `now - 0.0` was well
+    under the cooldown and a process that had never dispatched anything
+    concluded it had just dispatched. Two real curator listings sat unprocessed.
+
+    This deliberately does NOT pass `now=`: injecting a large timestamp is what
+    hid the bug, because it silently supplied the epoch the code assumed.
+    """
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "x")
+    monkeypatch.setenv("GITHUB_REPO", "o/r")
+    monkeypatch.setattr(app.dispatch, "_last_fired", None)
+
+    # A container that booted a quarter of a second ago, as a cold start is.
+    monkeypatch.setattr(app.dispatch.time, "monotonic", lambda: 0.25)
+    assert app.dispatch.should_fire(1) is True, "a cold container must dispatch"
+
+    # And having fired, it still honours the cooldown against that same clock.
+    monkeypatch.setattr(app.dispatch, "_last_fired", 0.25)
+    monkeypatch.setattr(app.dispatch.time, "monotonic", lambda: 0.25 + 60)
+    assert app.dispatch.should_fire(1) is False
+    monkeypatch.setattr(
+        app.dispatch.time, "monotonic", lambda: 0.25 + app.dispatch.COOLDOWN_SECONDS
+    )
+    assert app.dispatch.should_fire(1) is True
+
+
+def test_the_health_line_says_whether_a_dispatch_would_fire(monkeypatch):
+    """`configured` alone was green while nothing fired; name the cooldown too."""
+    monkeypatch.setattr(app.dispatch, "_last_fired", None)
+    assert "never fired" in app.dispatch.cooldown_state()
+
+    monkeypatch.setattr(app.dispatch.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(app.dispatch, "_last_fired", 100.0)
+    assert "cooling down" in app.dispatch.cooldown_state()
 
 
 def test_dispatch_respects_the_cooldown(monkeypatch):

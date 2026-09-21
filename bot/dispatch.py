@@ -55,7 +55,16 @@ COOLDOWN_SECONDS = 5 * 60
 # this stops a burst inside one invocation and not much more. The workflow's own
 # `concurrency: weekly-digest` group is what actually prevents overlapping runs;
 # this just avoids asking for them.
-_last_fired: float = 0.0
+#
+# `None`, never 0.0. `time.monotonic()` counts from the *container's* boot, so on
+# a Vercel microVM it starts near zero — and 0.0 is not a neutral sentinel there,
+# it reads as "fired at boot". A container younger than COOLDOWN_SECONDS then
+# computed `now - 0.0 < 300` and refused to dispatch although it had never
+# dispatched anything. Every cold start is younger than that, which is most of
+# them: two real curator listings on 2026-09-21 sat unprocessed because of it.
+# The unit tests passed an explicit `now=10_000`, so they never saw the epoch
+# they were implicitly assuming.
+_last_fired: float | None = None
 
 
 def configured() -> bool:
@@ -63,11 +72,32 @@ def configured() -> bool:
 
 
 def should_fire(pending: int, *, now: float | None = None) -> bool:
-    """Enough queued, not too recent, and configured at all."""
+    """Enough queued, not too recent, and configured at all.
+
+    A process that has never fired always fires: `_last_fired is None` is the
+    only correct reading of "no dispatch has happened here", and it cannot be
+    spelled as a number on a clock whose zero is the container's own boot.
+    """
     if not configured() or pending < INTAKE_TRIGGER_THRESHOLD:
         return False
+    if _last_fired is None:
+        return True
     now = time.monotonic() if now is None else now
     return now - _last_fired >= COOLDOWN_SECONDS
+
+
+def cooldown_state() -> str:
+    """One phrase for `?health=`: would this container dispatch right now?
+
+    Cheap to print and it would have named the 2026-09-21 failure outright,
+    where "configured" alone said everything was fine while nothing fired.
+    """
+    if _last_fired is None:
+        return "never fired in this container; ready"
+    waited = time.monotonic() - _last_fired
+    if waited >= COOLDOWN_SECONDS:
+        return f"last fired {waited:.0f}s ago; ready"
+    return f"last fired {waited:.0f}s ago; cooling down for {COOLDOWN_SECONDS - waited:.0f}s"
 
 
 def fire(*, now: float | None = None) -> bool:

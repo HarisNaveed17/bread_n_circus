@@ -161,7 +161,10 @@ def handle_health(token: str | None) -> tuple[int, str]:
 
     curators = len(_curators())
     lines.append(f"curators  : {curators or 'NONE — /insert is closed to everyone'}")
-    lines.append(f"dispatch  : {'configured' if dispatch.configured() else 'off (schedule only)'}")
+    lines.append(
+        f"dispatch  : {'configured' if dispatch.configured() else 'off (schedule only)'}"
+        f" — {dispatch.cooldown_state()}"
+    )
     try:
         rows = store.query("SELECT COUNT(*) FROM intake WHERE processed_at IS NULL")
         lines.append(f"intake    : table present — {rows[0][0]} pending")
