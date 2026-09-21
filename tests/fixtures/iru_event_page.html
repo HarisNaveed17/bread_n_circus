@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IRU Event</title>
+<meta property="og:title" content="IRU — Join the adventure">
+<meta property="og:description" content="An Islamabad Run With Us community event. Tap to see details and RSVP.">
+<meta name="theme-color" content="#0b0d0b">
+<style>
+  :root{--bg:#0b0d0b;--lime:#b6f02a;}
+  /* trimmed: 200 lines of CSS */
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="spin" id="spin"></div>
+</div>
+
+<script>
+const GAS_URL = 'https://islamabadrunwithus.com/iru-api/api.php';
+const eventId = (function(){ var m = location.pathname.split('/event/')[1]; return m ? m.split(/[/?#]/)[0] : ''; })();
+const refSrc = (function(){ try{ var q=new URLSearchParams(location.search); return (q.get('ref')||q.get('source')||q.get('utm_source')||'').slice(0,20);}catch(e){return '';} })();
+
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function linkify(s){ return esc(s).replace(/(https?:\/\/[^\s<]+)/g, function(u){ return '<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--lime);text-decoration:underline;word-break:break-all;">'+u+'</a>'; }); }
+function goingText(n){ n=parseInt(n,10)||0; return n>0 ? ('\uD83D\uDC5F '+n+' go
+  /* trimmed: 300 lines of JavaScript that fetch the event */
+</script>
+</body>
+</html>

@@ -73,6 +73,10 @@ datetimes are timezone-aware in `Asia/Karachi`.
   [Intake extraction](#intake-extraction).
 - `sources/instagram.py`, `sources/whatsapp.py` — the two adapters. Neither
   parses an event; they build a `Listing`.
+- `linkpage.py` — fetches the page a listing links to, reduced to plain text,
+  for the one case `extract` cannot answer from the message: a listing that
+  gives a weekday and no date. One GET, capped and never raising. See
+  [The second look](#the-second-look-at-a-listings-link).
 - `bot/intent.py` — message text → a `Filter` (`today`/`tomorrow`/the week).
   Word-list matching, not a model: three phrases is not an NLP problem and Meta
   retries a webhook that answers slowly. Categories join as another word list
@@ -554,6 +558,69 @@ Real input is ~2,050 tokens per call — a chars÷4 estimate had said 1,268, so
 The sample is eight listings. Haiku matching Opus on eight is not a guarantee
 it matches on eighty, and the failure that matters is inventing an event rather
 than a formatting slip. `MODEL` is one string.
+
+### The second look at a listing's link
+
+Built 2026-09-22, **verified against the live API and the live site the same
+day.** A weekly event names its day, not its date — and the message that
+carries it is a reminder, not an announcement:
+
+```
+Reminder for Today! 🏃‍♂️
+IRU Monday Intervals are happening today at the Sports Complex!
+Meeting time: 6:20 pm
+*IRU Web* https://app.islamabadrunwithus.com/event/1041
+```
+
+Refusing that is correct (rule 3 — "today" in a forward is often days old, and
+re-dating it puts a past event in front of readers as a future one). Discarding
+it is not, because **the link at the bottom knows exactly which Monday it
+was.** So a refusal for want of a *when* — `no_date`, `no_time`,
+`date_conflict`, or `is_event: true` with no date — is retried **once**, with
+the linked page's text appended between `--- Linked page (url) ---` fences.
+If the page names no date either, the listing is discarded exactly as before.
+Everything else (`not_an_event`, `unclear`) is final: an advert stays an advert
+however good its website is.
+
+Four things worth keeping:
+
+- **The IRU event page is a spinner.** It renders nothing server-side and
+  fetches the event from a plain, unauthenticated JSON endpoint named in its
+  own script — `islamabadrunwithus.com/iru-api/api.php?action=eventInfo&eventId=`
+  — which is where `{"when": "Monday 21 September, 6:20 pm"}` lives. Fetching
+  the HTML returns a stylesheet, so the listing would be dropped for want of a
+  page rather than for want of a date. `linkpage.RESOLVERS` rewrites the URL;
+  it is the Ticketwala lesson (§ M2) on one more host. **Add a resolver only
+  for a link a curator actually forwarded**, after checking its HTML is empty.
+  Generic pages need none of this — `page_text` strips the markup and returns
+  the text, and returns None when there is too little of it to hold a date.
+- **The page is untrusted bytes fetched from a URL in an untrusted message.**
+  Hence the caps (20s, 500KB streamed, 4,000 chars), the fences, and rule 15
+  telling the model the page is data and not instructions. `is_fetchable` is a
+  shape check against private and loopback addresses — it does not resolve the
+  host, and the curator allowlist is still the real boundary.
+- **The `Event` is built against the original message, never the page.**
+  `_clean_url` therefore still checks `event_url` against what the curator
+  forwarded, so a link that appears only on a fetched page cannot become the
+  link a reader taps.
+- **Rule 14 now asks for `event_url` even on a refusal**, because that is the
+  case where the link matters most. Without it the model returns nothing to
+  fetch on exactly the listings this was built for; `first_url` is the fallback.
+
+What the live run showed, 2026-09-22, Haiku 4.5 on the real message and the
+real endpoint: forwarded on Fri 19 Sep it declines `date_conflict`, fetches,
+and comes back with **Mon 2026-09-21 18:20, venue "Outer Track, Sports
+Complex", "Free"** — the venue and price coming from the page, which the
+message never states. The *same* message forwarded on Tue 22 Sep is still
+discarded, because the page's Monday is then yesterday. The three older
+WhatsApp samples extract unchanged; the film sample refuses on the old prompt
+too, so the new rules did not make the extractor more refusing.
+
+Cost is one extra model call and one GET, only on listings that would have been
+thrown away. `tests/conftest.py` patches `linkpage._get` for the whole suite —
+a listing that grows a URL must not quietly turn a unit test into an HTTP
+request — and it raises a `BaseException`, because `page_text` swallows every
+`Exception` by design.
 
 ## Dedup (M3)
 

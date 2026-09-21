@@ -28,6 +28,7 @@ import re
 from datetime import date
 
 from ..extract import Listing
+from ..linkpage import first_url
 
 log = logging.getLogger(__name__)
 
@@ -37,19 +38,12 @@ SLUG = "whatsapp"
 # attribution a message carries. Optional: a bare forward still works.
 _ORGANISER_RE = re.compile(r"^\s*organi[sz]er\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 
-# A URL anywhere in the body — a registration form, a ticket page. The first
-# one wins; these messages rarely carry two.
-_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+__all__ = ["SLUG", "first_url", "listing_from_message", "organiser", "source_ref"]
 
 
 def organiser(text: str) -> str | None:
     match = _ORGANISER_RE.search(text)
     return match.group(1) if match else None
-
-
-def first_url(text: str) -> str | None:
-    match = _URL_RE.search(text)
-    return match.group(0) if match else None
 
 
 def source_ref(text: str) -> str:

@@ -16,13 +16,14 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel
 
+from .linkpage import first_url, page_text
 from .models import KARACHI, Event
 
 log = logging.getLogger(__name__)
@@ -278,11 +279,8 @@ def to_event(found: Extraction, listing: Listing) -> Event | None:
     )
 
 
-def extract(listing: Listing, *, client=None) -> Event | None:
-    """One listing in, one `Event` or None out.
-
-    Transient failures cost this listing, not the run: the pipeline processes a
-    batch of forwarded posts and one timeout should not stop the rest.
+def _ask(listing: Listing, client) -> Extraction | None:
+    """One model call. None means this listing cost itself, and nothing else.
 
     **A 4xx is re-raised**, because it is a bug in the request rather than a
     problem with this listing — a wrong model name, a bad key, a parameter the
@@ -312,10 +310,84 @@ def extract(listing: Listing, *, client=None) -> Event | None:
     if found is None:
         log.warning("extract: no parsed output for %s", _label(listing))
         return None
-    return to_event(found, listing)
+    return found
 
 
-def extract_all(listings: list[Listing], *, client=None) -> list[Event]:
+# Refusals a linked page can answer. Everything else is final: "not_an_event"
+# means the text was an advert or a recap, and no page changes that.
+MISSING_WHEN = frozenset({"no_date", "no_time", "date_conflict"})
+
+# How the page is handed to the model. Fenced and labelled, so the model can
+# tell the organiser's own words from bytes fetched off a website — the prompt
+# tells it to read the page as data and obey nothing written there.
+LINKED_PAGE = "\n\n--- Linked page ({url}) ---\n{text}\n--- end of linked page ---"
+
+
+def _needs_a_date(found: Extraction) -> bool:
+    """Did this fail for want of a date or a time, rather than on its merits?
+
+    An extraction that claims to be an event is judged by whether a start can
+    actually be built from it — missing and unparseable are the same gap, and
+    a page that states the day plainly answers both.
+    """
+    if found.is_event:
+        return _starts_at(found.date or "", found.start_time or "") is None
+    return found.decline_reason in MISSING_WHEN
+
+
+def _with_linked_page(listing: Listing, found: Extraction, read_page) -> Listing | None:
+    """The same listing with the page it links to appended, or None.
+
+    The link is the model's `event_url` when it picked one — it can read the
+    labels, and "IRU Web" is the event where "Strava" is a tracking link — and
+    the first URL in the body otherwise. Either way it is checked against the
+    message text first, so the page fetched is one the organiser really linked.
+    """
+    url = _clean_url(found.event_url, listing.text) or first_url(listing.text)
+    if url is None:
+        return None
+    text = read_page(url)
+    if not text:
+        return None
+    return replace(listing, text=listing.text + LINKED_PAGE.format(url=url, text=text))
+
+
+def extract(listing: Listing, *, client=None, read_page=page_text) -> Event | None:
+    """One listing in, one `Event` or None out.
+
+    Transient failures cost this listing, not the run: the pipeline processes a
+    batch of forwarded posts and one timeout should not stop the rest.
+
+    **A listing that says "today" gets a second look before it is discarded.**
+    Organisers running something weekly write the reminder, not the date — "IRU
+    Monday Intervals are happening today", forwarded some days later — and the
+    extractor is right to refuse that text on its own. But the link at the
+    bottom of such a message usually resolves to a page that names the day, so
+    a refusal for want of a date or a time is retried once with that page
+    appended. If the page does not name a date either, the listing is discarded
+    exactly as before: a recurring event with no date is one a reader cannot
+    turn up to.
+
+    One retry, one page, and only on those refusals — see `MISSING_WHEN`. The
+    `Event` is still built against the *original* message, so a URL that
+    appears only on the fetched page cannot become the link readers are given.
+    """
+    found = _ask(listing, client)
+    if found is None:
+        return None
+    event = to_event(found, listing)
+    if event is not None or not _needs_a_date(found):
+        return event
+
+    enriched = _with_linked_page(listing, found, read_page)
+    if enriched is None:
+        return None
+    log.info("extract: no date in %s; re-reading it with the page it links to", _label(listing))
+    second = _ask(enriched, client)
+    return to_event(second, listing) if second is not None else None
+
+
+def extract_all(listings: list[Listing], *, client=None, read_page=page_text) -> list[Event]:
     """Extract a batch, keeping whatever succeeds."""
-    events = [extract(listing, client=client) for listing in listings]
+    events = [extract(listing, client=client, read_page=read_page) for listing in listings]
     return [e for e in events if e is not None]
