@@ -180,6 +180,22 @@ def handle_health(token: str | None) -> tuple[int, str]:
         lines.append(f"day views : MISSING — {exc}")
         lines.append("            same fix: run the pipeline once to migrate")
 
+    # How much of what the bot can serve is actually classified. The category
+    # picker is only worth offering once this is high: below it, "Music" comes
+    # back thin while the gigs sit unclassified under Mixed Bag. Unclassified
+    # events are not lost — Mixed Bag serves them — so this is a "is the picker
+    # honest yet" gauge, not an outage.
+    try:
+        rows = store.query(
+            "SELECT COUNT(*), COUNT(category) FROM digest_events WHERE event_date >= ?",
+            [_today().isoformat()],
+        )
+        total, labelled = int(rows[0][0] or 0), int(rows[0][1] or 0)
+        share = f"{labelled * 100 // total}%" if total else "n/a"
+        lines.append(f"categories: {labelled} of {total} upcoming classified ({share})")
+    except Exception as exc:
+        lines.append(f"categories: unknown — {exc}")
+
     return 200, "\n".join(lines)
 
 

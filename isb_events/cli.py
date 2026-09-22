@@ -15,6 +15,8 @@ import typer
 
 from . import check as health
 from . import pipeline
+from .categories import CATEGORIES
+from .classify import classify_missing
 from .intake import drain
 from .models import KARACHI, DigestWindow, Event
 from .normalize import dedupe
@@ -96,6 +98,12 @@ def _events_for(window: DigestWindow, store: Store, result, *, fetched: bool = T
     was a fetch. On a `--no-fetch` run `result` is empty by construction, so
     falling back would overwrite a good digest with "no events found". There
     the read failure is fatal and the run stops with nothing written.
+
+    Classification happens here rather than in `run_fetch`, and after dedupe,
+    for two reasons. The digest renders from the *store*, so labelling only what
+    a scrape returned would leave the rest of the week uncategorised on any run
+    a source came back empty — the failure that emptied six digests. And a
+    merged pair is one event by this point, so it is asked about once.
     """
     try:
         stored = store.events_in_window(window)
@@ -104,7 +112,14 @@ def _events_for(window: DigestWindow, store: Store, result, *, fetched: bool = T
             raise
         logging.getLogger(__name__).exception("could not read stored events; using the fetch")
         return result.events
-    return dedupe(stored)
+    events = dedupe(stored)
+    labelled = classify_missing(events, store)
+    # Persist what the classifier decided, or the next run re-reads the old
+    # value from the store and the cache only ever saves the model call.
+    newly = [e for old, e in zip(events, labelled, strict=True) if old.category != e.category]
+    if newly:
+        store.upsert_events(newly)
+    return labelled
 
 
 def _notifier(dry_run: bool) -> Notifier:
@@ -214,6 +229,35 @@ def run(week_of: str = WeekOpt, dry_run: bool = DryRunOpt) -> None:
         _notifier(dry_run).send(messages)
         if not dry_run:
             store.mark_digest_sent(week_start)
+
+
+@app.command()
+def classify(dry_run: bool = DryRunOpt) -> None:
+    """Give a category to every stored event that has none.
+
+    The ordinary runs classify the week they are rendering. This walks the whole
+    table, which is what a first rollout needs — and what a vocabulary change
+    needs, since `events_missing_category` counts a value outside the current
+    vocabulary as missing rather than leaving it stranded in a column no filter
+    matches.
+
+    Cached like any other classification, so running it twice costs one pass.
+    """
+    with Store.open() as store:
+        stale = store.events_missing_category(CATEGORIES)
+        if not stale:
+            typer.echo("every stored event already has a category")
+            return
+        typer.echo(f"classifying {len(stale)} event(s)")
+        labelled = classify_missing(stale, store)
+        changed = [e for old, e in zip(stale, labelled, strict=True) if old.category != e.category]
+        if dry_run:
+            for event in changed:
+                typer.echo(f"  {event.category:<18} {event.title}")
+            typer.echo(f"would label {len(changed)} of {len(stale)}; nothing written")
+            return
+        store.upsert_events(changed)
+        typer.echo(f"labelled {len(changed)} of {len(stale)}")
 
 
 def _now() -> datetime:
