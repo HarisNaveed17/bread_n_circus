@@ -28,9 +28,29 @@ def test_parse_fields_for_first_card():
     assert event.starts_at == datetime(2026, 8, 27, 18, 30, tzinfo=KARACHI)
     assert event.ends_at == datetime(2026, 8, 27, 20, 15, tzinfo=KARACHI)
     assert event.venue == "5-H, Street 100, G-11/3, Islamabad"
-    assert event.category == "Theater"
+    # The WP slug is `theater`; the digest's word for it is `theatre_and_film`.
+    # This expectation changed deliberately — the scraper used to Title-case the
+    # slug, which put programme-series names like "Baat Se Baat" in a column
+    # meant to hold things a reader can tap.
+    assert event.category == "theatre_and_film"
     assert event.price_text == "Free"
     assert event.url.startswith("https://site.theblackhole.pk/event/")
+
+
+def test_a_programme_series_slug_becomes_a_category_a_reader_can_ask_for():
+    """The live site files talks under its own series names.
+
+    "Baat Se Baat" is a talk series, not a category; stored verbatim it is a
+    label nobody can tap and no filter can match.
+    """
+    assert blackhole._parse_category("event_listing_category-baat-se-baat") == "talks"
+    assert blackhole._parse_category("event_listing_category-movie-screening") == "theatre_and_film"
+
+
+def test_an_unknown_slug_is_left_for_the_classifier():
+    """The site can add a slug any week. None means "not yet", not "no category"."""
+    assert blackhole._parse_category("event_listing_category-something-new") is None
+    assert blackhole._parse_category("no-category-here") is None
 
 
 def test_parse_when_tolerates_an_unparseable_end_time():

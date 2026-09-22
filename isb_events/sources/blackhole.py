@@ -16,6 +16,7 @@ from datetime import datetime
 import httpx
 from selectolax.parser import HTMLParser, Node
 
+from ..categories import BLACKHOLE_SLUGS
 from ..models import KARACHI, DigestWindow, Event
 from .base import register
 
@@ -34,8 +35,20 @@ def _clean(text: str | None) -> str:
 
 
 def _parse_category(class_attr: str) -> str | None:
+    """The WordPress taxonomy slug, mapped onto the digest's vocabulary.
+
+    This used to Title-case the slug and store that. Half of them are real
+    categories (`theater`, `movie-screening`) and half are the venue's own
+    programme-series names — "Baat Se Baat" is a talk series, "Bazm e Taareekh o
+    Adab" a history evening — so the column filled up with labels no reader
+    could ask for and no filter could match.
+
+    An unmapped slug yields None rather than a guess, and the classifier picks
+    the event up later. The site can add a slug any week; better an event the
+    classifier labels than a wrong label nobody notices.
+    """
     m = _CATEGORY_RE.search(class_attr)
-    return m.group(1).replace("-", " ").title() if m else None
+    return BLACKHOLE_SLUGS.get(m.group(1).lower()) if m else None
 
 
 def _parse_when(text: str) -> tuple[datetime, datetime | None]:
