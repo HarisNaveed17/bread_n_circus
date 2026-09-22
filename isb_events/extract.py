@@ -23,6 +23,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from .categories import clean_category
 from .linkpage import first_url, page_text
 from .models import KARACHI, Event
 
@@ -116,7 +117,28 @@ class Extraction(BaseModel):
     end_time: str | None = None
     venue: str | None = None
     price_text: str | None = None
-    category: str | None = None
+    # A fixed vocabulary, for the same reason `decline_reason` is one: the bot
+    # offers these as taps, so a value outside the list is a category no reader
+    # can ever reach. `messages.parse` constrains generation, so the model
+    # cannot emit anything else — `clean_category` is the guard for the paths
+    # that do not go through a model at all.
+    #
+    # Spelled out rather than built from `categories.CATEGORIES`, because
+    # `Literal` needs its values at type-check time. The two are pinned together
+    # by `test_the_extraction_vocabulary_is_the_vocabulary`, so they cannot drift.
+    category: (
+        Literal[
+            "music",
+            "comedy",
+            "theatre_and_film",
+            "talks",
+            "workshops",
+            "sports",
+            "social",
+            "mixed",
+        ]
+        | None
+    ) = None
     # The number to contact to book a place, when that is how booking works.
     # Narrow on purpose: a published registration line is the organiser's call
     # to action, not incidental personal data, and an entry without it is not
@@ -270,7 +292,7 @@ def to_event(found: Extraction, listing: Listing) -> Event | None:
         venue=(found.venue or "").strip() or None,
         starts_at=starts_at,
         ends_at=ends_at,
-        category=(found.category or "").strip() or None,
+        category=clean_category(found.category),
         price_text=(found.price_text or "").strip() or None,
         contact_phone=_clean_phone(found.registration_phone),
         url=_clean_url(found.event_url, listing.text) or listing.url,

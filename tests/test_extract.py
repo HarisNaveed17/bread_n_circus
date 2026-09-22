@@ -15,6 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from isb_events import extract as extract_module
 from isb_events import linkpage
@@ -233,6 +234,81 @@ def test_the_schema_stays_narrow():
     }
     reason = Extraction.model_fields["decline_reason"].annotation
     assert "str" not in str(reason).replace("Literal", "")
+
+
+# -- the category vocabulary -------------------------------------------------
+
+
+def test_the_extraction_vocabulary_is_the_vocabulary():
+    """`Extraction.category`'s Literal is spelled out; this is what pins it.
+
+    `Literal` needs its values at type-check time, so it cannot be built from
+    `categories.CATEGORIES`. Without this test the two drift and the model is
+    offered a vocabulary the rest of the pipeline does not recognise.
+    """
+    from isb_events.categories import CATEGORIES
+
+    annotation = str(Extraction.model_fields["category"].annotation)
+    for category in CATEGORIES:
+        assert f"'{category}'" in annotation
+    # And nothing beyond it: a value the bot cannot offer is a category no
+    # reader can reach.
+    assert annotation.count("'") == len(CATEGORIES) * 2
+
+
+@pytest.mark.parametrize("value", ["Baat Se Baat", "Healthcare", "arts & culture", "music!"])
+def test_the_schema_itself_refuses_an_out_of_vocabulary_category(value):
+    """The Literal is the first guard: the model cannot emit one of these.
+
+    `messages.parse` constrains generation against this schema, so a bad
+    category cannot come back from a live call — and if one somehow did, it
+    would fail here rather than reaching the store.
+    """
+    with pytest.raises(ValidationError):
+        Extraction(is_event=True, title="X", date="2026-09-05", start_time="18:00", category=value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Baat Se Baat", "Healthcare", "arts & culture", "sports, comedy", "", "   ", None],
+)
+def test_an_out_of_vocabulary_category_is_dropped_not_stored(value):
+    """`clean_category` is the second guard, for what never meets the schema.
+
+    Black Hole slugs and the backfill read straight into `Event.category`
+    without passing through `Extraction`. Storing a value no filter can match
+    would make the event invisible to the picker while `?health=` counted it as
+    classified — the worst of both.
+    """
+    from isb_events.categories import clean_category
+
+    assert clean_category(value) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("music", "music"),
+        ("MUSIC", "music"),
+        (" Music ", "music"),
+        ("theatre and film", "theatre_and_film"),
+        ("theatre-and-film", "theatre_and_film"),
+        ("mixed", "mixed"),
+    ],
+)
+def test_a_vocabulary_category_survives_cleaning(value, expected):
+    from isb_events.categories import clean_category
+
+    assert clean_category(value) == expected
+
+
+def test_a_clean_category_reaches_the_event():
+    found = Extraction(
+        is_event=True, title="X", date="2026-09-05", start_time="18:00", category="music"
+    )
+    event = to_event(found, _listing())
+    assert event is not None
+    assert event.category == "music"
 
 
 # -- the registration number -------------------------------------------------
@@ -457,6 +533,22 @@ def test_the_rules_the_live_run_proved_necessary_are_present():
     assert "EARLIEST time an attendee is expected" in SYSTEM  # rule 4
     assert "Islamabad occurrence" in SYSTEM  # rule 9
     assert "three months" in SYSTEM  # rule 13
+
+
+def test_the_prompt_states_the_category_vocabulary_and_its_precedence():
+    """The model has to be told the words, and which axis wins.
+
+    Without the precedence sentence a class in a subject is classified
+    arbitrarily, which makes the same title flicker between buckets on
+    consecutive cron runs — and `normalize._merge` then propagates whichever
+    value happened to win.
+    """
+    from isb_events.categories import CATEGORIES
+    from isb_events.extract import SYSTEM
+
+    for category in CATEGORIES:
+        assert category in SYSTEM
+    assert "Format beats subject" in SYSTEM  # rule 17
 
 
 # -- the model picks the link ------------------------------------------------
