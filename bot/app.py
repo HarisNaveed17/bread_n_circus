@@ -72,6 +72,10 @@ MAX_UPCOMING = 20
 NOTHING_UPCOMING = (
     "Nothing listed for the next {days} days yet — new listings go up through the week."
 )
+# A category that matched nothing says so, rather than widening to everything:
+# someone who asked for sports and got a comedy gig learns the filter does not
+# work. The buttons still follow, so the reply is an offer, not a dead end.
+NOTHING_UPCOMING_IN = "Nothing listed for {what} in the next few days. Try another view?"
 
 # Honouring a typed STOP is a Meta requirement, not a feature. Kept to exact
 # words rather than substring matching: "stop commenting on my body" is an
@@ -388,20 +392,25 @@ def _reply(to: str, wanted: intent.Filter) -> None:
         _send_with_buttons(to, NOT_UNDERSTOOD)
         return
     if wanted.kind == intent.WEEK:
-        _send_upcoming(to)
+        _send_upcoming(to, wanted)
         return
     _send_day(to, wanted)
 
 
-def _send_upcoming(to: str) -> None:
+def _send_upcoming(to: str, wanted: intent.Filter = intent.WEEK_FILTER) -> None:
     """The default reply: everything from today to `UPCOMING_DAYS` out.
 
     Built from `digest_events`, not from the stored weekly text, so it crosses
     the week boundary and never shows a day that has already happened.
+
+    Takes the whole `Filter` rather than just a category, because the empty
+    reply has to echo the asker's own words back.
     """
     today = _today()
     try:
-        rows = store.events_between(today, today + timedelta(days=UPCOMING_DAYS - 1))
+        rows = store.events_between(
+            today, today + timedelta(days=UPCOMING_DAYS - 1), wanted.category
+        )
     except Exception:
         # `digest_events` not migrated yet (CLAUDE.md § Working notes). The
         # stored weekly text is worse but it is not nothing.
@@ -410,8 +419,14 @@ def _send_upcoming(to: str) -> None:
         return
 
     if not rows:
-        log.info("bot: nothing upcoming for %s", to)
-        _send_with_buttons(to, NOTHING_UPCOMING.format(days=UPCOMING_DAYS))
+        log.info("bot: nothing upcoming for %s (category=%s)", to, wanted.category)
+        # A category that matched nothing says so rather than widening to
+        # everything: someone who asked for sports and got a comedy gig learns
+        # the filter does not work.
+        if wanted.category:
+            _send_with_buttons(to, NOTHING_UPCOMING_IN.format(what=wanted.label))
+        else:
+            _send_with_buttons(to, NOTHING_UPCOMING.format(days=UPCOMING_DAYS))
         return
 
     cut = max(0, len(rows) - MAX_UPCOMING)
@@ -423,7 +438,11 @@ def _send_upcoming(to: str) -> None:
         else:
             days.append((label, [block]))
 
-    header = f"*Islamabad — {days[0][0]} onwards*"
+    # Name the category in the header when there is one, so a short list reads
+    # as "this is the music" rather than as a thin week. The bare category name,
+    # not `label` — that carries the timeframe too, which the header already has.
+    what = f" — {intent.CATEGORY_LABELS[wanted.category]}" if wanted.category else ""
+    header = f"*Islamabad{what} — {days[0][0]} onwards*"
     note = f"…and {cut} more not shown." if cut else ""
     log.info("bot: sending %d upcoming event(s) to %s", len(rows), to)
     _send_parts(to, _pack_days(header, days, note))
@@ -455,7 +474,7 @@ def _pack_days(header: str, days: list[tuple[str, list[str]]], note: str = "") -
 def _send_day(to: str, wanted: intent.Filter) -> None:
     """One day's events, assembled from the blocks the pipeline already rendered."""
     try:
-        rows = store.day_events(wanted.day)
+        rows = store.day_events(wanted.day, wanted.category)
     except Exception:
         # Most likely `digest_events` does not exist yet: migrations only run
         # when the pipeline connects, and this deployment can be newer than the
@@ -472,18 +491,19 @@ def _send_day(to: str, wanted: intent.Filter) -> None:
         return
 
     label = rows[0][0]
-    parts = _pack_day(label, [block for _, block in rows])
+    what = intent.CATEGORY_LABELS[wanted.category] if wanted.category else ""
+    parts = _pack_day(label, [block for _, block in rows], what)
     log.info("bot: sending %d event(s) for %s to %s", len(rows), wanted.day, to)
     _send_parts(to, parts)
 
 
-def _pack_day(label: str, blocks: list[str]) -> list[str]:
+def _pack_day(label: str, blocks: list[str], what: str = "") -> list[str]:
     """Header plus blocks, split at block boundaries under the char limit.
 
     A single day overflowing 4096 would take a dozen events and is not expected;
     this is here so that if it ever happens the reply truncates nowhere.
     """
-    header = f"*Islamabad — {label}*"
+    header = f"*Islamabad — {what} — {label}*" if what else f"*Islamabad — {label}*"
     messages: list[str] = []
     current = header
     for block in blocks:

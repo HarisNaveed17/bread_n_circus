@@ -117,20 +117,54 @@ WHERE event_date >= ? AND event_date <= ?
 ORDER BY event_date, starts_at
 """
 
+CATEGORY_EVENTS_SQL = """
+SELECT event_date, day_label, block FROM digest_events
+WHERE event_date >= ? AND event_date <= ? AND category = ?
+ORDER BY event_date, starts_at
+"""
 
-def events_between(start: date, end: date) -> list[tuple[str, str, str]]:
+# Mixed Bag also serves the unclassified, and that is the point of it. An event
+# the classifier could not label, or has not reached yet, would otherwise be
+# reachable only by date — invisible to anyone browsing by category, and the
+# bucket nobody can open would be exactly the one holding what the classifier
+# found hardest. `category = 'mixed'` alone would be the tidier query and the
+# worse product.
+MIXED_EVENTS_SQL = """
+SELECT event_date, day_label, block FROM digest_events
+WHERE event_date >= ? AND event_date <= ? AND (category = 'mixed' OR category IS NULL)
+ORDER BY event_date, starts_at
+"""
+
+MIXED = "mixed"
+
+
+def events_between(
+    start: date, end: date, category: str | None = None
+) -> list[tuple[str, str, str]]:
     """`(event_date, day_label, block)` across an inclusive date range.
 
     The pipeline always renders two weeks — the current one and the next — so
     any window of seven days from today is fully covered by these rows.
+
+    Three separate statements rather than one built by string concatenation:
+    `query` binds every argument as `{"type": "text"}`, so a None threaded
+    through an optional placeholder arrives at Turso as the literal "None" and
+    silently matches nothing.
     """
-    rows = query(RANGE_EVENTS_SQL, [start.isoformat(), end.isoformat()])
+    args = [start.isoformat(), end.isoformat()]
+    if category is None:
+        sql = RANGE_EVENTS_SQL
+    elif category == MIXED:
+        sql = MIXED_EVENTS_SQL
+    else:
+        sql, args = CATEGORY_EVENTS_SQL, [*args, category]
+    rows = query(sql, args)
     return [(row[0] or "", row[1] or "", row[2] or "") for row in rows]
 
 
-def day_events(day: date) -> list[tuple[str, str]]:
+def day_events(day: date, category: str | None = None) -> list[tuple[str, str]]:
     """`(day_label, block)` for everything on one day, in start order."""
-    return [(label, block) for _, label, block in events_between(day, day)]
+    return [(label, block) for _, label, block in events_between(day, day, category)]
 
 
 # -- intake ------------------------------------------------------------------

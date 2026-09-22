@@ -125,7 +125,7 @@ def stored_digest(monkeypatch):
     # The default reply reads digest_events, not the stored weekly text. Without
     # this the rolling-window path would raise and silently fall back, and every
     # assertion below would pass while testing the wrong code.
-    monkeypatch.setattr(store, "events_between", lambda a, b: UPCOMING_ROWS)
+    monkeypatch.setattr(store, "events_between", lambda a, b, c=None: UPCOMING_ROWS)
     _set(DIGEST)
     return _set
 
@@ -762,6 +762,93 @@ def test_tomorrow_wins_over_today_when_both_appear():
     assert intent.parse("not today — tomorrow", today=TODAY).label == "tomorrow"
 
 
+# -- categories, and the two axes --------------------------------------------
+
+
+def test_a_category_and_a_day_are_read_independently():
+    """The whole point of the restructure: a message can carry both."""
+    wanted = intent.parse("sports events happening today", today=TODAY)
+    assert (wanted.kind, wanted.day, wanted.category) == (intent.DAY, TODAY, "sports")
+
+
+def test_a_week_word_loses_to_a_named_day():
+    """ "events" is a week word, and "sports events ... today" contains one.
+
+    A reader who named a day means that day. This falls out of the ordering in
+    `_timeframe`, but it is pinned because the old early-return code had the
+    same behaviour by accident and a reader would assume it was load-bearing.
+    """
+    assert intent.parse("events today", today=TODAY).kind == intent.DAY
+    assert intent.parse("music events tomorrow", today=TODAY).day == date(2026, 9, 2)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("music", "music"),
+        ("any gigs?", "music"),
+        ("comedy tonight", "comedy"),
+        ("stand up", "comedy"),
+        ("any workshops this week", "workshops"),
+        ("classes tomorrow", "workshops"),
+        ("talks", "talks"),
+        ("films", "theatre_and_film"),
+        ("what sports are on", "sports"),
+        ("meetups", "social"),
+        ("surprise me", "mixed"),
+        ("mixed bag", "mixed"),
+    ],
+)
+def test_the_category_words_are_recognised(text, expected):
+    assert intent.parse(text, today=TODAY).category == expected
+
+
+def test_a_category_alone_means_the_whole_week_of_it():
+    """Someone texting "music" wants the gigs, not a refusal for naming no day."""
+    wanted = intent.parse("music", today=TODAY)
+    assert (wanted.kind, wanted.category) == (intent.WEEK, "music")
+
+
+def test_a_bare_week_filter_is_unchanged():
+    """The canary: `Filter` gained a field, and this asserts whole-object equality."""
+    assert intent.parse("whats on", today=TODAY) == intent.WEEK_FILTER
+    assert intent.WEEK_FILTER.category is None
+
+
+def test_anything_on_today_is_still_the_day_not_the_mixed_bag():
+    """ "anything on ...?" is one of the project's own week phrases.
+
+    Reading "anything" as a mixed-bag word silently narrowed a question people
+    already ask — which is why it is deliberately absent from CATEGORY_WORDS.
+    """
+    wanted = intent.parse("anything on today?", today=TODAY)
+    assert (wanted.kind, wanted.day, wanted.category) == (intent.DAY, TODAY, None)
+
+
+def test_an_unrecognised_message_is_still_unknown():
+    assert intent.parse("is this the pizza place", today=TODAY).kind == intent.UNKNOWN
+
+
+def test_the_label_names_the_category_and_the_day():
+    """The empty reply echoes the asker's own words back."""
+    assert intent.parse("music today", today=TODAY).label == "music today"
+    assert intent.parse("music", today=TODAY).label == "music"
+
+
+def test_the_bots_categories_match_the_pipelines():
+    """`bot/` cannot import `isb_events`, so the vocabulary exists twice.
+
+    `vercel.json` keeps the package out of the function bundle. This is the
+    same discipline as `test_the_bots_post_pattern_matches_the_pipelines`.
+    """
+    from isb_events.categories import CATEGORIES as pipeline_categories
+
+    assert intent.CATEGORIES == frozenset(pipeline_categories)
+    # Every category can be asked for, and named back to a reader.
+    assert set(intent.CATEGORY_WORDS.values()) == intent.CATEGORIES
+    assert set(intent.CATEGORY_LABELS) == intent.CATEGORIES
+
+
 # -- day replies -------------------------------------------------------------
 
 
@@ -770,7 +857,7 @@ def day_rows(monkeypatch):
     """Serve `digest_events` rows without touching Turso."""
 
     def _set(rows):
-        monkeypatch.setattr(store, "day_events", lambda day: rows)
+        monkeypatch.setattr(store, "day_events", lambda day, category=None: rows)
 
     _set([("Tue 1 Sep", "• *Talk*\n🕒 7pm")])
     return _set
@@ -810,7 +897,7 @@ def test_an_empty_day_says_so_instead_of_sending_the_week(sent, stored_digest, d
 def test_a_missing_digest_events_table_falls_back_to_the_week(sent, stored_digest, monkeypatch):
     """Migrations run in the pipeline, so the bot can be newer than the schema."""
 
-    def boom(day):
+    def boom(day, category=None):
         raise RuntimeError("no such table: digest_events")
 
     monkeypatch.setattr(store, "day_events", boom)
@@ -847,7 +934,9 @@ def test_the_buttons_are_a_separate_message_so_nothing_overflows(sent, stored_di
     # A packed message exactly on the limit: the buttons must not be glued to it.
     overhead = len("*Islamabad — Sun 6 Sep onwards*\n\n*Sun 6 Sep*\n\n")
     big = "y" * (app.WHATSAPP_LIMIT - overhead)
-    monkeypatch.setattr(store, "events_between", lambda a, b: [("2026-09-06", "Sun 6 Sep", big)])
+    monkeypatch.setattr(
+        store, "events_between", lambda a, b, c=None: [("2026-09-06", "Sun 6 Sep", big)]
+    )
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
     assert len(sent) == 2
@@ -857,7 +946,7 @@ def test_the_buttons_are_a_separate_message_so_nothing_overflows(sent, stored_di
 
 def test_short_replies_carry_the_buttons_on_themselves(sent, stored_digest, monkeypatch):
     """A one-line reply and its buttons are one message, not two."""
-    monkeypatch.setattr(store, "events_between", lambda a, b: [])
+    monkeypatch.setattr(store, "events_between", lambda a, b, c=None: [])
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
     assert len(sent) == 1
@@ -1037,7 +1126,7 @@ def test_the_default_reply_asks_the_store_from_today_onward(sent, stored_digest,
     """Nothing before today: the old reply showed two days that had passed."""
     asked = {}
 
-    def fake_between(start, end):
+    def fake_between(start, end, category=None):
         asked["start"], asked["end"] = start, end
         return UPCOMING_ROWS
 
@@ -1053,7 +1142,7 @@ def test_events_on_one_day_share_a_single_heading(sent, stored_digest, monkeypat
     monkeypatch.setattr(
         store,
         "events_between",
-        lambda a, b: [
+        lambda a, b, c=None: [
             ("2026-09-06", "Sun 6 Sep", "• *Early*"),
             ("2026-09-06", "Sun 6 Sep", "• *Late*"),
             ("2026-09-07", "Mon 7 Sep", "• *Next day*"),
@@ -1067,7 +1156,7 @@ def test_events_on_one_day_share_a_single_heading(sent, stored_digest, monkeypat
 
 
 def test_an_empty_window_does_not_claim_there_is_no_digest(sent, stored_digest, monkeypatch):
-    monkeypatch.setattr(store, "events_between", lambda a, b: [])
+    monkeypatch.setattr(store, "events_between", lambda a, b, c=None: [])
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
     assert sent == [("923001234567", app.NOTHING_UPCOMING.format(days=app.UPCOMING_DAYS))]
@@ -1075,7 +1164,7 @@ def test_an_empty_window_does_not_claim_there_is_no_digest(sent, stored_digest, 
 
 def test_the_upcoming_reply_is_capped_with_a_note(sent, stored_digest, monkeypatch):
     rows = [(f"2026-09-{6 + n // 3:02d}", f"Day {n // 3}", f"• *Gig {n}*") for n in range(30)]
-    monkeypatch.setattr(store, "events_between", lambda a, b: rows)
+    monkeypatch.setattr(store, "events_between", lambda a, b, c=None: rows)
     raw, sig = _signed(_message_payload(text="what's on"))
     app.handle_event(raw, sig)
     body = "\n".join(b for _, b in sent)
@@ -1088,7 +1177,7 @@ def test_a_missing_digest_events_table_falls_back_to_the_stored_week(
 ):
     """Until the migration lands remotely, the weekly text is better than nothing."""
 
-    def boom(start, end):
+    def boom(start, end, category=None):
         raise RuntimeError("no such table: digest_events")
 
     monkeypatch.setattr(store, "events_between", boom)
@@ -1446,3 +1535,97 @@ def test_a_message_with_no_context_is_not_a_forward():
     assert app._is_forwarded({"type": "text"}) is False
     assert app._is_forwarded({"type": "text", "context": {}}) is False
     assert app._is_forwarded({"type": "text", "context": {"forwarded": True}}) is True
+
+
+# -- category filtering in the store -----------------------------------------
+
+
+def _captured_query(monkeypatch):
+    """Record the SQL and args the store would send, without a network call."""
+    seen = {}
+
+    def _query(sql, args=None):
+        seen["sql"], seen["args"] = " ".join(sql.split()), args
+        return []
+
+    monkeypatch.setattr(store, "query", _query)
+    return seen
+
+
+def test_no_category_uses_the_plain_range_query(monkeypatch):
+    seen = _captured_query(monkeypatch)
+    store.events_between(date(2026, 9, 6), date(2026, 9, 12))
+    assert "category" not in seen["sql"]
+    assert seen["args"] == ["2026-09-06", "2026-09-12"]
+
+
+def test_a_category_is_bound_not_interpolated(monkeypatch):
+    """`query` binds every arg as text; a value spliced into the SQL is a bug."""
+    seen = _captured_query(monkeypatch)
+    store.events_between(date(2026, 9, 6), date(2026, 9, 12), "music")
+    assert "category = ?" in seen["sql"]
+    assert seen["args"] == ["2026-09-06", "2026-09-12", "music"]
+
+
+def test_mixed_bag_also_returns_unclassified_events(monkeypatch):
+    """The reason `mixed` is askable at all.
+
+    An event the classifier could not label, or has not reached yet, must stay
+    reachable by tapping — otherwise the bucket holding the classifier's
+    failures is the one bucket nobody can open.
+    """
+    seen = _captured_query(monkeypatch)
+    store.events_between(date(2026, 9, 6), date(2026, 9, 12), "mixed")
+    assert "category = 'mixed' OR category IS NULL" in seen["sql"]
+    # No third bind: the category is in the statement, not an argument.
+    assert seen["args"] == ["2026-09-06", "2026-09-12"]
+
+
+def test_a_day_query_passes_the_category_through(monkeypatch):
+    seen = _captured_query(monkeypatch)
+    store.day_events(date(2026, 9, 6), "comedy")
+    assert seen["args"] == ["2026-09-06", "2026-09-06", "comedy"]
+
+
+# -- category replies --------------------------------------------------------
+
+
+def test_a_category_narrows_the_day(sent, stored_digest, monkeypatch):
+    asked = {}
+
+    def _day_events(day, category=None):
+        asked["category"] = category
+        return [("Tue 1 Sep", "• *Gig*\n🕒 8pm")]
+
+    monkeypatch.setattr(store, "day_events", _day_events)
+    raw, sig = _signed(_message_payload(text="music today"))
+    app.handle_event(raw, sig)
+    assert asked["category"] == "music"
+    assert "Gig" in sent[0][1]
+
+
+def test_an_empty_category_says_so_rather_than_widening(sent, stored_digest, monkeypatch):
+    """Answering "sports today" with a comedy gig teaches that the filter is broken."""
+    monkeypatch.setattr(store, "day_events", lambda day, category=None: [])
+    raw, sig = _signed(_message_payload(text="sports today"))
+    app.handle_event(raw, sig)
+    assert sent == [("923001234567", app.NOTHING_ON.format(when="sports today"))]
+
+
+def test_an_empty_category_week_offers_the_buttons(sent, stored_digest, monkeypatch):
+    monkeypatch.setattr(store, "events_between", lambda a, b, c=None: [])
+    raw, sig = _signed(_message_payload(text="comedy"))
+    app.handle_event(raw, sig)
+    assert "comedy" in sent[0][1]
+    assert "Nothing listed" in sent[0][1]
+
+
+def test_a_category_week_names_itself_in_the_header(sent, stored_digest, monkeypatch):
+    monkeypatch.setattr(
+        store,
+        "events_between",
+        lambda a, b, c=None: [("2026-09-06", "Sun 6 Sep", "• *Gig*")],
+    )
+    raw, sig = _signed(_message_payload(text="music this week"))
+    app.handle_event(raw, sig)
+    assert "music" in sent[0][1]
