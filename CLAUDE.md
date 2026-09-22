@@ -622,6 +622,142 @@ a listing that grows a URL must not quietly turn a unit test into an HTTP
 request — and it raises a `BaseException`, because `page_text` swallows every
 `Exception` by design.
 
+## Categories
+
+Built 2026-09-22, **backfilled and measured against a copy of the live store the
+same day.** Every event carries one of eight values, and the bot filters on it.
+
+```
+music  comedy  theatre_and_film  talks  workshops  sports  social  mixed
+```
+
+`isb_events/categories.py` is the one definition; `bot/intent.py` carries a
+second copy because it cannot import the package (`vercel.json` keeps it out of
+the function bundle), and `test_the_bots_categories_match_the_pipelines` pins
+the two.
+
+**Format beats subject, and that is the whole precedence rule.** If a listing
+teaches a skill over a scheduled session it is `workshops`, whatever the
+subject: "Raag Yaman for Students" is workshops, not music, and "Theater &
+Acting for Beginners" is workshops, not theatre. Someone who taps Music wants a
+gig, and six sittings of a students' raag class is the worse failure. Verified
+on the live corpus: all 20 class-shaped events landed in `workshops`.
+
+Arbitrary precedence is the one unacceptable option, because `normalize._merge`
+fills a null category from a dropped duplicate — a title labelled `music` one
+run and `workshops` the next makes the bot's answer flicker with no code change.
+
+**`mixed` is a real answer and it is askable.** An earlier draft had it storable
+but never offered, which would have made anything landing there reachable only
+by date and invisible to the picker — and since every misclassification lands
+there too, the unreachable bucket would have been exactly the one holding what
+the classifier got hardest. `NULL` stays distinct and means "not classified
+yet", so the `?health=` coverage figure can tell "3 events fit nothing" from "30
+events failed". **The Mixed Bag view queries `category = 'mixed' OR category IS
+NULL`**, so nothing is ever invisible; that one `OR` is what makes the feature
+safe to ship before coverage is perfect.
+
+**`talks` earns its slot.** Without it the twelve lecture-type events (the six
+Healthcare talks, Environmental Issues, Rymun, ConnectED) land in `mixed` at 13%
+or stretch an "arts & culture" bucket into a superset of music, comedy and
+theatre — which a model cannot hold a line on, so the same title drifts between
+buckets between runs. With it, `mixed` sits at 3%.
+
+### Where categories come from
+
+Three classifiers, strict precedence, all pipeline-side:
+
+1. `extract.py`'s existing Haiku call, now a `Literal`. Intake only — **3 of 95
+   live events.** Leveraging that call is nearly free and is the small part of
+   this job; the two scrapers never touch a model.
+2. `categories.BLACKHOLE_SLUGS`. The scraper used to Title-case the WordPress
+   CSS slug, so half the column held real categories and half held the venue's
+   own programme names ("Baat Se Baat" is a talk series). An unmapped slug now
+   yields `None` — the live site uses nine slugs where the fixture has three, so
+   the map cannot be exhaustive and must fall through.
+3. `classify.py`, a batched Haiku pass over anything still null.
+
+**Ticketwala's `type` is not used as a category.** It only separates `events`
+from `workshops`, so all 47 would collapse into two buckets and `music` would be
+empty while the button claimed otherwise. Nothing sets `Event.raw`, so there was
+no free hint to pass through either.
+
+**Not a keyword/regex classifier.** The real titles defeat it — Naik Chor,
+PARWANA, Synchronicity, Darwaste Aadmi, Gidh, Kumrat After Dark carry no
+classifiable English keyword.
+
+### The cache is a correctness mechanism
+
+`migrations/005_event_categories.sql`, keyed on `sha256(title|venue)` plus
+`VOCAB_VERSION`. The cron renders two weeks twice daily, so the same title
+passes through four times a day; without the cache the model is asked about
+"Kaavish Live" 730 times a year and any run that answers differently makes the
+bot flicker. Bumping `VOCAB_VERSION` re-decides everything in one edit.
+
+**A failed call is never cached — only an answer is.** `_ask` returns `None` for
+"the call did not happen" and a dict for "the model answered", and only the
+latter is written. Caching a failure would write "could not say" against the
+whole corpus on the first broken run and never ask again, with the cache
+reporting itself perfectly warm. `tests/test_cli.py` caught this: a `render`
+with no API key poisoned the backfill that followed.
+
+### What the live run showed, 2026-09-22
+
+95 events copied from Turso to a local file, then `isb-events classify`:
+
+| | |
+|---|---|
+| Labelled | **95 of 95**, four calls, zero left null |
+| `mixed` | **3%** — the hand-label baseline, against a 10% ceiling |
+| Measured tokens | **1,265 per batch of 25 — 50.6 per event** (`count_tokens`) |
+| Backfill cost | under $0.01 |
+| Steady state | ~$0.03/yr cached; ~$4/yr if the cache were removed |
+
+Distribution: workshops 23%, talks 22%, music 18%, social 13%,
+theatre_and_film 11%, sports 4%, comedy 3%, mixed 3%.
+
+Note the token estimate came in at 50.6 against a 51 guess — the *opposite* of
+the § What the live run showed scar, where chars÷4 understated by 60%. Batching
+amortises the prompt, so the per-event figure is nearly all title.
+
+Disagreements with the hand labels were all defensible except one: "CORE - The
+Sunset Festival" went to `mixed` where a reader would expect music. One title is
+not worth a prompt change.
+
+**Backfilling needs `source_ref`.** A first attempt copied the live table
+without that column, and the two `whatsapp` events rehashed to new ids and were
+*duplicated* rather than updated — 95 rows became 97. `Event.id` hashes
+`source_ref or url or title+starts_at`, so any tool that rebuilds `Event`s from
+SQL must select the full `EVENT_COLUMNS`.
+
+### The bot side
+
+`intent.parse` reads **two independent axes** and combines them, rather than
+returning on the first match: "sports events happening today" is both, "music"
+is a category with no timeframe. A category alone means the whole week of it.
+
+**"events" is a week word**, so that example contains one. A week hit is the
+weakest timeframe signal and loses to a named day. The old early-return code had
+the same behaviour by accident; there is now a test saying it is meant.
+
+**"anything" is deliberately not a mixed-bag word.** "anything on today?" is one
+of the project's own `WEEK_PHRASES`, and reading it as a category silently
+narrowed a question people already ask. `test_today_is_recognised` caught it.
+
+Meta caps reply buttons at three, so Tomorrow moved into a **list message**
+behind a new Browse button: ten rows, which is the cap, holding eight categories
+plus Today and Tomorrow. A list tap arrives in `interactive.list_reply` rather
+than `button_reply` and `_body_text` reads both — the "a tap is literally the
+typed word" contract is unchanged, and the button-title test now covers rows
+too. `test_every_category_is_reachable_from_the_list` caught Social missing.
+
+Browse is routed before `intent.parse`, because it is the one button that asks a
+question rather than answering one.
+
+**`?health=` reports coverage** (`categories: N of M upcoming classified`). That
+is the gate for trusting the picker — below ~90%, Music comes back thin while
+the gigs sit unclassified. It is not an outage, because Mixed Bag serves them.
+
 ## Dedup (M3)
 
 Built 2026-09-02. `normalize.dedupe()` merges two records only when **all** of

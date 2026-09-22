@@ -25,7 +25,7 @@ GREETING = (
     "Islamabad. Don't want your entire social life to revolve around eating? Just "
     "text KSH here and it'll give you a summary of everything happening today, "
     "tomorrow and all of next week. Ask for a kind of thing too — try "
-    "\"music this week\" or \"comedy tonight\", or tap *Browse* for the full list."
+    '"music this week" or "comedy tonight", or tap *Browse* for the full list.'
 )
 # The bot never writes first, so "no digest" means the listings are between
 # refreshes, not that the week has not been published.
