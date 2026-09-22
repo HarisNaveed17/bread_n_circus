@@ -42,7 +42,7 @@ def _upcoming() -> list[str]:
     return [UPCOMING_REPLY, app.PICK_BODY]
 
 
-BUTTON_TITLES = ("Today", "Tomorrow", "This week")
+BUTTON_TITLES = ("Today", "This week", "Browse")
 
 
 class _Outbox(list):
@@ -440,8 +440,8 @@ def test_send_buttons_uses_the_interactive_shape(monkeypatch):
     assert inter["body"] == {"text": "Pick a view"}
     assert inter["action"]["buttons"] == [
         {"type": "reply", "reply": {"id": "today", "title": "Today"}},
-        {"type": "reply", "reply": {"id": "tomorrow", "title": "Tomorrow"}},
         {"type": "reply", "reply": {"id": "week", "title": "This week"}},
+        {"type": "reply", "reply": {"id": "browse", "title": "Browse"}},
     ]
     assert all(len(title) <= 20 for _, title in whatsapp.BUTTONS)
     assert len(whatsapp.BUTTONS) <= 3
@@ -973,7 +973,90 @@ def test_the_button_titles_are_words_the_parser_knows():
     """The tap comes back as the title; if a title stops parsing, taps go to NOT_UNDERSTOOD."""
     today = date(2026, 9, 6)
     kinds = {title: intent.parse(title, today=today).kind for _, title in whatsapp.BUTTONS}
-    assert kinds == {"Today": intent.DAY, "Tomorrow": intent.DAY, "This week": intent.WEEK}
+    # "Browse" is deliberately not a filter: it is routed before `intent.parse`
+    # because there is no view it could mean.
+    assert kinds == {"Today": intent.DAY, "This week": intent.WEEK, "Browse": intent.UNKNOWN}
+    assert "browse" in app.BROWSE_WORDS
+
+
+def test_every_list_row_title_is_a_word_the_parser_knows():
+    """A list tap is literally the typed word, exactly as a button tap is.
+
+    Rename a row and it must still parse, or the tap falls through to
+    NOT_UNDERSTOOD and the category is unreachable by tapping.
+    """
+    today = date(2026, 9, 6)
+    for _, title, _desc in whatsapp.LIST_ROWS:
+        assert intent.parse(title, today=today).kind != intent.UNKNOWN, title
+
+
+def test_every_category_is_reachable_from_the_list():
+    """The list is the only way most categories are discoverable at all."""
+    today = date(2026, 9, 6)
+    offered = {intent.parse(title, today=today).category for _, title, _ in whatsapp.LIST_ROWS}
+    assert intent.CATEGORIES <= offered
+
+
+def test_the_list_fits_inside_metas_limits():
+    """Ten rows, 24-char titles, 72-char descriptions. A 400 here is silence."""
+    assert len(whatsapp.LIST_ROWS) <= 10
+    ids = [id_ for id_, _, _ in whatsapp.LIST_ROWS]
+    assert len(ids) == len(set(ids))
+    for id_, title, desc in whatsapp.LIST_ROWS:
+        assert len(id_) <= 24
+        assert len(title) <= whatsapp.LIST_ROW_TITLE_LIMIT
+        assert len(desc) <= whatsapp.LIST_ROW_DESC_LIMIT
+
+
+def test_send_list_uses_the_list_shape(monkeypatch):
+    sent_payload = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(
+        whatsapp.httpx,
+        "post",
+        lambda url, **kw: (sent_payload.update(kw["json"]), _Resp())[1],
+    )
+    whatsapp.send_list("923236501038", "What are you after?")
+    inter = sent_payload["interactive"]
+    assert inter["type"] == "list"
+    assert inter["body"] == {"text": "What are you after?"}
+    assert inter["action"]["button"] == whatsapp.LIST_BUTTON
+    rows = inter["action"]["sections"][0]["rows"]
+    assert len(rows) == len(whatsapp.LIST_ROWS)
+    assert rows[0] == {"id": "today", "title": "Today", "description": "Everything on today"}
+
+
+def test_a_tapped_list_row_is_handled_like_the_typed_word(sent, stored_digest, monkeypatch):
+    """A list tap arrives in `list_reply`, not `button_reply`."""
+    asked = {}
+
+    def _between(start, end, category=None):
+        asked["category"] = category
+        return [("2026-09-06", "Sun 6 Sep", "• *Gig*")]
+
+    monkeypatch.setattr(store, "events_between", _between)
+    payload = _message_payload(text="ignored")
+    message = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+    message.pop("text")
+    message["type"] = "interactive"
+    message["interactive"] = {"type": "list_reply", "list_reply": {"id": "music", "title": "Music"}}
+    raw, sig = _signed(payload)
+    app.handle_event(raw, sig)
+    assert asked["category"] == "music"
+
+
+def test_browse_opens_the_list(sent, stored_digest, monkeypatch):
+    lists = []
+    monkeypatch.setattr(whatsapp, "send_list", lambda to, body, *a, **kw: lists.append((to, body)))
+    raw, sig = _signed(_message_payload(text="Browse"))
+    app.handle_event(raw, sig)
+    assert lists == [("923001234567", app.BROWSE_BODY)]
 
 
 # -- the first message gets the greeting -------------------------------------

@@ -24,8 +24,8 @@ GREETING = (
     "Welcome to *Kya Scene Hai?* Your rundown of everything that's happening in "
     "Islamabad. Don't want your entire social life to revolve around eating? Just "
     "text KSH here and it'll give you a summary of everything happening today, "
-    "tomorrow and all of next week. Don't believe us? Text \"What's on tonight?\" "
-    "to try it out."
+    "tomorrow and all of next week. Ask for a kind of thing too — try "
+    "\"music this week\" or \"comedy tonight\", or tap *Browse* for the full list."
 )
 # The bot never writes first, so "no digest" means the listings are between
 # refreshes, not that the week has not been published.
@@ -83,6 +83,11 @@ NOTHING_UPCOMING_IN = "Nothing listed for {what} in the next few days. Try anoth
 # not be silently unsubscribed.
 OPT_OUT_WORDS = {"stop", "unsubscribe", "stop promotions", "cancel"}
 OPT_IN_WORDS = {"subscribe", "start", "join"}
+
+# The one button that asks a question instead of answering one, so it is routed
+# before `intent.parse` — there is no filter "browse" could mean.
+BROWSE_WORDS = {"browse", "categories", "category", "menu", "options"}
+BROWSE_BODY = "What are you in the mood for? 👀"
 
 # Curators forward listings with this prefix. A keyword rather than "anything
 # from a curator", because curators also just ask what's on.
@@ -260,7 +265,11 @@ def _body_text(message: dict) -> str:
     understands, so a tap is handled exactly as if it had been typed.
     """
     if message.get("type") == "interactive":
-        reply = (message.get("interactive") or {}).get("button_reply") or {}
+        interactive = message.get("interactive") or {}
+        # A button tap and a list-row tap arrive in different keys and are the
+        # same thing to us: both carry the title, and the title is a word the
+        # parser knows.
+        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
         return reply.get("title") or ""
     return (message.get("text") or {}).get("body") or ""
 
@@ -313,6 +322,14 @@ def _handle_message(message: dict) -> None:
         store.opt_in(sender)
         whatsapp.send_text(sender, OPT_IN_REPLY)
         _send_upcoming(sender)
+        return
+
+    # "Browse" is the one button whose job is to ask a question rather than
+    # answer one, so it is routed here rather than through `intent.parse` —
+    # there is no filter it could mean.
+    if word in BROWSE_WORDS:
+        log.info("bot: sending the category list to %s", sender)
+        whatsapp.send_list(sender, BROWSE_BODY)
         return
 
     _reply(sender, intent.parse(body, today=_today()))

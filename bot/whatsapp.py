@@ -24,7 +24,36 @@ TIMEOUT = 10.0
 # button message and titles are capped at 20 characters. A tap comes back as an
 # `interactive` message carrying the title, which `intent.parse` reads like
 # typed text — so the ids are informational and the titles are the contract.
-BUTTONS = (("today", "Today"), ("tomorrow", "Tomorrow"), ("week", "This week"))
+BUTTONS = (("today", "Today"), ("week", "This week"), ("browse", "Browse"))
+
+# What "Browse" opens: all eight categories, plus the Tomorrow view the third
+# button used to hold. Ten rows is Meta's cap for a list and this uses exactly
+# ten, so a ninth category would have to displace Tomorrow or split into two
+# sections.
+#
+# Row titles are capped at 24 characters and descriptions at 72. **The title is
+# the contract**, exactly as with the buttons: a tap comes back carrying it, and
+# `intent.parse` reads it like typed text, so every title here has to be a word
+# the parser knows. `test_the_button_titles_are_words_the_parser_knows` covers
+# these as well as the buttons.
+LIST_BUTTON = "Categories"
+LIST_ROWS = (
+    ("today", "Today", "Everything on today"),
+    ("tomorrow", "Tomorrow", "Everything on tomorrow"),
+    ("music", "Music", "Gigs, DJ sets, qawwali nights"),
+    ("comedy", "Comedy", "Stand-up and improv"),
+    ("theatre", "Theatre", "Plays, screenings, book launches"),
+    ("talks", "Talks", "Lectures, panels, discussions"),
+    ("workshops", "Workshops", "Classes and things to learn"),
+    ("sports", "Sports", "Runs, matches, screenings"),
+    ("social", "Social", "Meetups, game nights, mixers"),
+    # Last, and the one row whose title does not describe its contents — hence
+    # the description. It also serves the events nothing has classified yet, so
+    # it is never empty while the rest of the list is thin.
+    ("mixed bag", "Mixed Bag", "Markets, festivals and one-offs"),
+)
+LIST_ROW_TITLE_LIMIT = 24
+LIST_ROW_DESC_LIMIT = 72
 # An interactive message's body is capped well below a text message's 4096.
 # Anything longer goes out as text, followed by a short button message.
 BUTTON_BODY_LIMIT = 1024
@@ -184,6 +213,51 @@ def send_buttons(to: str, body: str, buttons: tuple[tuple[str, str], ...] = BUTT
                         {"type": "reply", "reply": {"id": id_, "title": title}}
                         for id_, title in buttons
                     ]
+                },
+            },
+        }
+    )
+
+
+def send_list(
+    to: str,
+    body: str,
+    button_label: str = LIST_BUTTON,
+    rows: tuple[tuple[str, str, str], ...] = LIST_ROWS,
+) -> dict:
+    """A tappable list. The way past the three-button ceiling.
+
+    Meta caps reply buttons at three, and Today / This week / Browse spend all
+    of them. A list holds ten rows, which is what makes eight categories
+    offerable at all.
+
+    The cost is one extra tap and a different payload on the way back — a tap
+    arrives as `interactive.list_reply` rather than `button_reply`, which
+    `app._body_text` reads the same way. The contract is unchanged: the row's
+    *title* is what comes back, and `intent.parse` reads it like typed text.
+    """
+    return _post(
+        {
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body},
+                "action": {
+                    "button": button_label,
+                    "sections": [
+                        {
+                            "title": "What's on",
+                            "rows": [
+                                {
+                                    "id": id_,
+                                    "title": title[:LIST_ROW_TITLE_LIMIT],
+                                    "description": desc[:LIST_ROW_DESC_LIMIT],
+                                }
+                                for id_, title, desc in rows
+                            ],
+                        }
+                    ],
                 },
             },
         }
