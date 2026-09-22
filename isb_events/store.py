@@ -251,28 +251,37 @@ class Store:
             "WHERE starts_at >= ? AND starts_at < ? ORDER BY starts_at",
             (window.start.isoformat(), window.end.isoformat()),
         ).fetchall()
-        events: list[Event] = []
-        for row in rows:
-            try:
-                events.append(
-                    Event(
-                        title=row[0],
-                        venue=row[1],
-                        starts_at=datetime.fromisoformat(row[2]),
-                        ends_at=datetime.fromisoformat(row[3]) if row[3] else None,
-                        category=row[4],
-                        price_text=row[5],
-                        url=row[6],
-                        source_ref=row[7],
-                        contact_phone=row[8],
-                        sources=json.loads(row[9]) if row[9] else [],
-                        series_key=row[10],
-                        description=row[11],
-                    )
-                )
-            except Exception:  # a single unreadable row must not sink the digest
-                log.exception("store: could not rebuild an event from %r", row[0])
-        return events
+        return [event for event in (self._event_from_row(row) for row in rows) if event]
+
+    def _event_from_row(self, row) -> Event | None:
+        """One `EVENT_COLUMNS` row back into an `Event`, or None if it is unreadable.
+
+        Positional, because libSQL has no `row_factory` and hands back plain
+        tuples. That couples these indices to `EVENT_COLUMNS` by hand — insert a
+        column mid-string and every field after it shifts silently — so the
+        mapping lives here once rather than at each call site.
+
+        A single bad row is logged and skipped, never raised: one unreadable
+        event must not sink a digest that the other ninety are fine for.
+        """
+        try:
+            return Event(
+                title=row[0],
+                venue=row[1],
+                starts_at=datetime.fromisoformat(row[2]),
+                ends_at=datetime.fromisoformat(row[3]) if row[3] else None,
+                category=row[4],
+                price_text=row[5],
+                url=row[6],
+                source_ref=row[7],
+                contact_phone=row[8],
+                sources=json.loads(row[9]) if row[9] else [],
+                series_key=row[10],
+                description=row[11],
+            )
+        except Exception:
+            log.exception("store: could not rebuild an event from %r", row[0])
+            return None
 
     # -- digests --------------------------------------------------------------
 
@@ -339,6 +348,65 @@ class Store:
             (_now_iso(), week_of.isoformat()),
         )
         self._conn.commit()
+
+    # -- the classification cache ---------------------------------------------
+    #
+    # See `migrations/005_event_categories.sql`: this exists so the same title
+    # is decided once rather than four times a day, which keeps the answer
+    # stable as much as it keeps the cost near zero.
+
+    def cached_categories(self, hashes: list[str], vocab_version: str) -> dict[str, str | None]:
+        """Cached decisions for these title hashes, under this vocabulary.
+
+        A key present with a NULL value is a real cached answer — "the
+        classifier looked and could not say" — so callers must check membership
+        rather than truthiness, or they re-pay for every shrug.
+        """
+        if not hashes:
+            return {}
+        # Bound positionally and one placeholder per hash: libSQL is qmark-only
+        # and a named `:param` dict raises TypeError on that backend.
+        placeholders = ", ".join("?" for _ in hashes)
+        rows = self._conn.execute(
+            "SELECT title_hash, category FROM event_categories "
+            f"WHERE vocab_version = ? AND title_hash IN ({placeholders})",
+            (vocab_version, *hashes),
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def save_categories(self, decided: dict[str, str | None], vocab_version: str) -> None:
+        """Remember what the classifier said, including that it said nothing."""
+        if not decided:
+            return
+        now = _now_iso()
+        for title_hash, category in decided.items():
+            self._conn.execute(
+                """
+                INSERT INTO event_categories (title_hash, vocab_version, category, classified_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(title_hash, vocab_version) DO UPDATE SET
+                    category      = excluded.category,
+                    classified_at = excluded.classified_at
+                """,
+                (title_hash, vocab_version, category, now),
+            )
+        self._conn.commit()
+
+    def events_missing_category(self, valid: tuple[str, ...]) -> list[Event]:
+        """Stored events whose category is absent or not in the vocabulary.
+
+        The second half is what makes a vocabulary change recoverable: rows
+        written under an older set of words are picked up and re-decided rather
+        than sitting in a column no filter matches.
+        """
+        placeholders = ", ".join("?" for _ in valid)
+        rows = self._conn.execute(
+            f"SELECT {self.EVENT_COLUMNS} FROM events "
+            f"WHERE category IS NULL OR category NOT IN ({placeholders}) "
+            "ORDER BY starts_at",
+            tuple(valid),
+        ).fetchall()
+        return [event for event in (self._event_from_row(row) for row in rows) if event]
 
     # -- health ---------------------------------------------------------------
     #

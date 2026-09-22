@@ -322,3 +322,48 @@ def test_other_not_nulls_survive_the_rebuild(store):
     assert not notnull["url"]
     assert notnull["title"]
     assert notnull["starts_at"]
+
+
+# -- the classification cache ------------------------------------------------
+#
+# Run against both backends like everything else here: `cached_categories`
+# builds its placeholders dynamically and binds a variable-length tuple, which
+# is exactly the shape that broke on libSQL before (qmark-only, no row_factory).
+
+
+def test_a_cached_category_round_trips(store):
+    store.save_categories({"aaa": "music", "bbb": "talks"}, "1")
+    assert store.cached_categories(["aaa", "bbb"], "1") == {"aaa": "music", "bbb": "talks"}
+
+
+def test_a_cached_could_not_say_is_a_hit_not_a_miss(store):
+    """A None value present in the map means "asked, and the answer was nothing"."""
+    store.save_categories({"ccc": None}, "1")
+    cached = store.cached_categories(["ccc"], "1")
+    assert "ccc" in cached
+    assert cached["ccc"] is None
+
+
+def test_the_cache_is_scoped_to_the_vocabulary_version(store):
+    store.save_categories({"ddd": "music"}, "1")
+    assert store.cached_categories(["ddd"], "2") == {}
+
+
+def test_a_re_decision_replaces_the_old_one(store):
+    store.save_categories({"eee": "music"}, "1")
+    store.save_categories({"eee": "comedy"}, "1")
+    assert store.cached_categories(["eee"], "1") == {"eee": "comedy"}
+
+
+def test_asking_about_nothing_touches_no_database(store):
+    assert store.cached_categories([], "1") == {}
+    store.save_categories({}, "1")  # must not raise
+
+
+def test_events_missing_category_finds_the_unlabelled_and_the_stale(store):
+    """A row written under an older vocabulary is picked up, not left stranded."""
+    store.upsert_event(_event(url="https://x/1", category=None))
+    store.upsert_event(_event(url="https://x/2", category="music"))
+    store.upsert_event(_event(url="https://x/3", category="Baat Se Baat"))
+    missing = store.events_missing_category(("music", "talks"))
+    assert sorted(e.url for e in missing) == ["https://x/1", "https://x/3"]
