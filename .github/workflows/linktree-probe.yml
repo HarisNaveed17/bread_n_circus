@@ -1,0 +1,167 @@
+name: Linktree probe
+
+# A throwaway diagnostic, not part of the pipeline. It answers one question:
+# does linktr.ee serve a parseable page to a GitHub runner?
+#
+# The M7 bio-link track fetches an organiser's linktree and reads the event
+# links out of `__NEXT_DATA__`. Verified from a residential IP on 2026-08-31
+# and again 2026-09-23: plain httpx gets a flat 403, curl_cffi with
+# impersonate="chrome" gets 200. Runners egress from Azure ranges, and this is
+# exactly where the Ticketwala price scraper died — it worked on a laptop and
+# 403'd in CI, which is the worst kind of difference because nothing surfaces
+# it (CLAUDE.md § Ticketwala prices).
+#
+# So: 200 here means build the scraper in the pipeline. 403 means it has to be
+# a separate local tool writing to Turso, like the Instagram fallback.
+#
+# Delete this workflow once the answer is recorded in CLAUDE.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Linktree page to probe (default: afislamabad)."
+        required: false
+        type: string
+
+concurrency:
+  group: linktree-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Read through the environment, never interpolated into a run block —
+      # `${{ inputs.* }}` inline in a shell script is a script-injection hole.
+      PROBE_URL: ${{ inputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # curl_cffi lives in the pipeline extra; the point is to compare it
+      # against plain httpx, since which one works is the whole question.
+      - run: uv sync --frozen --extra pipeline
+
+      - name: Where is this runner egressing from?
+        # A block is only interpretable if we know what got blocked. The
+        # runner's public IP is ephemeral and not a secret.
+        run: |
+          set -euo pipefail
+          ip=$(curl -s --max-time 15 https://api.ipify.org || echo "unknown")
+          echo "egress IP: $ip"
+          echo "- egress IP: \`$ip\`" >> "$GITHUB_STEP_SUMMARY"
+          curl -s --max-time 15 "https://ipinfo.io/$ip/org" \
+            | sed 's/^/- org: /' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Fetch the linktree and parse its links
+        run: |
+          set -o pipefail
+          uv run python - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+          import re
+          import time
+
+          DEFAULT = "https://linktr.ee/afislamabad"
+          url = (os.environ.get("PROBE_URL") or "").strip() or DEFAULT
+
+          # Keep this a probe, not a general-purpose fetcher living in CI.
+          if not re.fullmatch(r"https://linktr\.ee/[\w.-]+/?", url):
+              raise SystemExit(f"refusing to fetch a non-Linktree URL: {url!r}")
+
+          print(f"### Linktree probe\n\n- url: {url}\n")
+
+          # The script tag carries a `crossorigin` attribute, so the regex must
+          # allow attributes between the id and the closing bracket or it
+          # silently will not match (CLAUDE.md § Alliance Française).
+          NEXT_DATA = re.compile(
+              r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S
+          )
+
+          def report(name, status, text, elapsed, err=None):
+              if err:
+                  print(f"**{name}** — ERROR after {elapsed:.1f}s: `{err}`\n")
+                  return
+              print(f"**{name}** — HTTP {status}, {len(text):,} bytes, {elapsed:.1f}s\n")
+
+              # A 200 is not the answer on its own: a bot-check interstitial is
+              # also a 200. The page is only usable if the payload parses and
+              # holds links, so that is what gets reported.
+              match = NEXT_DATA.search(text)
+              if not match:
+                  note = "a 200 without the payload" if status == 200 else "blocked"
+                  print(f"- `__NEXT_DATA__`: **absent** — {note}")
+                  signals = {
+                      "cloudflare": "cf-browser-verification" in text
+                      or "Just a moment" in text,
+                      "captcha": "captcha" in text.lower()[:5000],
+                      "rate limited": "too many requests" in text.lower()[:5000],
+                  }
+                  hit = [k for k, v in signals.items() if v] or ["none matched"]
+                  print(f"- signals: {', '.join(hit)}")
+                  print("- first 300 bytes:")
+                  print("```")
+                  print(text[:300])
+                  print("```\n")
+                  return
+
+              try:
+                  links = json.loads(match.group(1))["props"]["pageProps"]["links"]
+              except Exception as e:
+                  print(f"- `__NEXT_DATA__` present but unreadable: `{type(e).__name__}: {e}`\n")
+                  return
+
+              groups = [x for x in links if x.get("type") == "GROUP"]
+              print(f"- `__NEXT_DATA__`: **parsed**, {len(links)} links, {len(groups)} groups")
+
+              # Children attach via parent.id, never via the group's own
+              # `children`, which is always []. If that ever changes, the
+              # counts below go to zero and this is where it shows.
+              #
+              # Compare as strings: a group's own `id` is a string while a
+              # child's `parent.id` is an int, so `==` between them is always
+              # False and every group reports zero children. Nothing errors —
+              # which is exactly how a scraper written this way would report
+              # "no events" forever.
+              for group in groups:
+                  kids = [
+                      x for x in links
+                      if str((x.get("parent") or {}).get("id"))
+                      == str(group.get("id"))
+                  ]
+                  print(f"  - **{group.get('title', '').strip()}** — {len(kids)} links")
+                  for kid in kids:
+                      meta = kid.get("metaData") or {}
+                      # metaData.title is the destination's OG title, captured
+                      # by Linktree at link-creation time. It is what makes
+                      # fetching the linked Google Forms unnecessary.
+                      has_meta = "yes" if meta.get("title") else "no"
+                      print(f"    - {kid.get('title', '').strip()[:80]!r} (meta: {has_meta})")
+              print()
+
+          import httpx
+
+          t = time.monotonic()
+          try:
+              r = httpx.get(url, timeout=30, follow_redirects=True)
+              report("httpx (default UA)", r.status_code, r.text, time.monotonic() - t)
+          except Exception as e:
+              report("httpx (default UA)", None, "", time.monotonic() - t, err=f"{type(e).__name__}: {e}")
+
+          t = time.monotonic()
+          try:
+              from curl_cffi import requests as creq
+
+              r = creq.get(url, impersonate="chrome", timeout=30)
+              report("curl_cffi (chrome)", r.status_code, r.text, time.monotonic() - t)
+          except Exception as e:
+              report("curl_cffi (chrome)", None, "", time.monotonic() - t, err=f"{type(e).__name__}: {e}")
+          PY
